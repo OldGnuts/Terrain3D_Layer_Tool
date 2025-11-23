@@ -1,4 +1,4 @@
-// /Masks/StampMask.cs (Corrected for Action<long>)
+// /Masks/StampMask.cs
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -30,7 +30,6 @@ namespace Terrain3DTools.Masks
 
         public override MaskRequirements MaskDataRequirements() => MaskRequirements.None;
 
-        // --- START OF CORRECTION FOR THE ENTIRE FILE ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid())
         {
             if (StampTexture == null) { ClearCachedTexture(); return (null, null, new List<string> { "" }); }
@@ -74,7 +73,6 @@ namespace Terrain3DTools.Masks
                 RenderingDevice.TextureUsageBits.SamplingBit | RenderingDevice.TextureUsageBits.CanUpdateBit
             );
 
-            // CHANGED: The command must now be an Action<long> to be compatible with the task system.
             // The 'computeList' parameter is unused by TextureUpdate, but the signature must match.
             Action<long> uploadCommand = (computeList) => {
                 Gpu.TextureUpdate(_cachedComputeTextureRid, 0, textureData);
@@ -84,7 +82,6 @@ namespace Terrain3DTools.Masks
                 if(_uploadTasks.ContainsKey(sourceRid)) _uploadTasks.Remove(sourceRid);
             };
             
-            // This constructor call is now valid.
             var uploadTask = new AsyncGpuTask(uploadCommand, onComplete, null, null, "Upload Image");
             _uploadTasks[sourceRid] = uploadTask;
             AsyncGpuTaskManager.Instance.AddTask(uploadTask);
@@ -117,7 +114,6 @@ namespace Terrain3DTools.Masks
             uint groupsY = (uint)((maskHeight + 7) / 8);
             return (op.CreateDispatchCommands(groupsX, groupsY), op.GetTemporaryRids(), new List<string> { shaderPath });
         }
-        // --- END OF CORRECTION ---
 
         private void ClearCachedTexture()
         {
@@ -134,4 +130,5 @@ namespace Terrain3DTools.Masks
             if (what == NotificationPredelete) { ClearCachedTexture(); }
         }
     }
+
 }
