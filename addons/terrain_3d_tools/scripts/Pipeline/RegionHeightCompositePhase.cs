@@ -26,7 +26,7 @@ namespace Terrain3DTools.Pipeline
                     continue;
                 }
 
-                // CRITICAL: Get ALL layers affecting this region (not just dirty ones)
+                // Get ALL layers affecting this region (not just dirty ones)
                 var tieredLayers = context.RegionDependencyManager.GetTieredLayersForRegion(regionCoords);
 
                 var allHeightLayers = tieredLayers?.HeightLayers
@@ -86,8 +86,8 @@ namespace Terrain3DTools.Pipeline
             if (clearCmd != null) allCommands.Add(clearCmd);
             allTempRids.AddRange(clearRids);
 
-            // CHANGED: Only add layer application commands if there are layers
-            // If heightLayers is empty, the region will just be cleared (which is correct)
+            // Only add layer application commands if there are layers
+            // If heightLayers is empty, the region will just be cleared
             if (heightLayers.Count > 0)
             {
                 var regionMin = TerrainCoordinateHelper.RegionMinWorld(regionCoords, context.RegionSize);
@@ -134,4 +134,5 @@ namespace Terrain3DTools.Pipeline
                 shaderPaths);
         }
     }
+
 }
