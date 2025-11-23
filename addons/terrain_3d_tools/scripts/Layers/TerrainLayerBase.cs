@@ -107,9 +107,8 @@ namespace Terrain3DTools.Layers
 
         #region Abstract Methods
 
-        // --- START OF CORRECTION ---
         /// <summary>
-        /// REFACTORED: This method now returns a description of GPU commands that accept a compute list.
+        /// This method returns a description of GPU commands that accept a compute list.
         /// </summary>
         /// <returns>A tuple containing the GPU command Action<long> and a list of any temporary RIDs created.</returns>
         public abstract (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyRegionCommands(
@@ -118,7 +117,6 @@ namespace Terrain3DTools.Layers
             int regionSize,
             Vector2 regionMinWorld,
             Vector2 regionSizeWorld);
-        // --- END OF CORRECTION ---
 
         public abstract LayerType GetLayerType();
         public abstract string LayerTypeName();
