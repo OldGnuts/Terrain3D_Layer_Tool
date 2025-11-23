@@ -141,11 +141,11 @@ namespace Terrain3DTools.Layers
             }
         }
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyHeightCommands(
-    Vector2I regionCoords,
-    RegionData regionData,
-    int regionSize,
-    Vector2 regionMinWorld,
-    Vector2 regionSizeWorld)
+            Vector2I regionCoords,
+            RegionData regionData,
+            int regionSize,
+            Vector2 regionMinWorld,
+            Vector2 regionSizeWorld)
         {
             if (!ModifiesHeight || !layerTextureRID.IsValid || !regionData.HeightMap.IsValid)
             {
@@ -169,7 +169,7 @@ namespace Terrain3DTools.Layers
             operation.BindSamplerWithTexture(1, layerTextureRID);       // Influence mask
             operation.BindSamplerWithTexture(2, layerHeightDataRID);    // Height data
 
-            // IMPORTANT: Normalize embankment height by world height scale
+            // Normalize embankment height by world height scale
             float normalizedEmbankmentHeight = _embankmentHeight / _worldHeightScale;
 
             // DEBUG: Print what we're sending
@@ -193,7 +193,7 @@ namespace Terrain3DTools.Layers
                 .Add(_carveStrength)
                 .Add(_pathElevation)
                 .Add(_terrainConformance)
-                .Add(normalizedEmbankmentHeight)  // CHANGED: Use normalized value
+                .Add(normalizedEmbankmentHeight)  
                 .AddPadding(8)
                 .Build();
 
@@ -262,7 +262,6 @@ namespace Terrain3DTools.Layers
             Vector2 regionMinWorld,
             Vector2 regionSizeWorld)
         {
-            // Simplified: just combine height and texture commands
             var allCommands = new List<Action<long>>();
             var allTempRids = new List<Rid>();
             var allShaderPaths = new List<string>();
@@ -307,4 +306,5 @@ namespace Terrain3DTools.Layers
             return (combinedCommands, allTempRids, allShaderPaths);
         }
     }
+
 }
