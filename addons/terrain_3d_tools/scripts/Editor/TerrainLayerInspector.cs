@@ -30,8 +30,6 @@ namespace Terrain3DTools.Editor
             var previewButton = new Button { Text = "Generate Mask Preview" };
             previewButton.Pressed += () =>
             {
-                // --- ASYNCHRONOUS WORKFLOW ---
-
                 // 1. Safety Checks and find the main manager
                 if (!IsInstanceValid(layer) || !layer.IsInsideTree())
                 {
@@ -62,7 +60,7 @@ namespace Terrain3DTools.Editor
                 // 3. Define the OnComplete callback. This runs on the main thread AFTER the GPU is done.
                 Action onComplete = () =>
                 {
-                    // Safety check: The user might have closed the inspector while the GPU was working.
+                    // The user might have closed the inspector while the GPU was working.
                     if (!IsInstanceValid(previewTex)) return;
 
                     int maskWidth = layer.Size.X;
