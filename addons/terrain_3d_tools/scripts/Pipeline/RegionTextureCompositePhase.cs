@@ -23,7 +23,7 @@ namespace Terrain3DTools.Pipeline
             {
                 if (!context.CurrentlyActiveRegions.Contains(regionCoords)) continue;
 
-                // CRITICAL: Get ALL layers affecting this region
+                // Get ALL layers affecting this region
                 var tieredLayers = context.RegionDependencyManager.GetTieredLayersForRegion(regionCoords);
 
                 if (tieredLayers == null || !tieredLayers.ShouldProcess())
