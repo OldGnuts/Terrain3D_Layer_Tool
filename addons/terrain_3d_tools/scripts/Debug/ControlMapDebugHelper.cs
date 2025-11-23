@@ -1,5 +1,5 @@
 using Godot;
-using Terrain3DTools.Core;      // REFACTOR: Add namespace for Gpu and GpuUtils.
+using Terrain3DTools.Core;
 using Terrain3DTools.Utils;
 
 namespace Terrain3DTools.Debug
@@ -38,7 +38,7 @@ namespace Terrain3DTools.Debug
                 for (int x = 0; x < regionSize; x++)
                 {
                     int idx = y * regionSize + x;
-                    if (idx >= pixels.Length) continue; // Safety check
+                    if (idx >= pixels.Length) continue;
                     
                     uint packed = pixels[idx];
 
