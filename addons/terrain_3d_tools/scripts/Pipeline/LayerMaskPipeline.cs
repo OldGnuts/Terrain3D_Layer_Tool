@@ -1,3 +1,4 @@
+// /Pipeline/LayerMaskPipeline.cs
 using Godot;
 using Terrain3DTools.Core;
 using Terrain3DTools.Layers;
@@ -42,8 +43,6 @@ namespace Terrain3DTools.Pipeline
 
             // STEP 1: CLEAR TEXTURE
             Color clearColor = layer.GetLayerType() == LayerType.Height ? Colors.White : Colors.Black;
-            // Note: Height layers usually start at 0 (no change), assuming Add mode.
-            // If you support Overwrite mode, this might need to be different, but Black (0) is safe for now.
 
             var (clearCmd, clearRids, clearShaderPath) = CreateClearCommands(targetTexture, maskWidth, maskHeight, clearColor);
             if (clearCmd != null)
@@ -90,7 +89,7 @@ namespace Terrain3DTools.Pipeline
                     allTempRids.AddRange(stitchRids);
                     operationCount++;
 
-                    // Crucial: We must clean up the staging resources created by the Stager
+                    // Clean up the staging resources created by the Stager
                     allTempRids.Add(heightmapArray);
                     allTempRids.Add(metadataBuffer);
 
