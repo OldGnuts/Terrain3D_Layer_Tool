@@ -141,7 +141,7 @@ namespace Terrain3DTools.Layers
                     DebugPrint($"  Segment {i}: layer({layerPos1.X:F1}, {layerPos1.Y:F1}) -> ({layerPos2.X:F1}, {layerPos2.Y:F1})");
                 }
 
-                // IMPORTANT: Match GLSL struct layout with padding
+                // Match GLSL struct layout with padding
                 segments.Add(layerPos1.X);                      // start_pos.x
                 segments.Add(layerPos1.Y);                      // start_pos.y
                 segments.Add(worldPos1.Y / _worldHeightScale);  // start_height
