@@ -5,13 +5,8 @@ namespace Terrain3DTools.Layers
 {
     public partial class PathLayer : FeatureLayer
     {
-        #region GPU Resources
-        // Standard mask texture (influence)
-        // Inherited: public Rid layerTextureRID;
-
         // Height data texture (path Y values)
         private Rid layerHeightDataRID;
-        #endregion
         #region Private Fields
         private Path3D _path3D;
         private PathType _pathType = PathType.Path;
