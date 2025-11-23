@@ -15,11 +15,9 @@ namespace Terrain3DTools.Visuals
         private bool _isSelected = false;
         private Vector2I _oldSize = Vector2I.Zero;
 
-        // -----------------------------------------
         // Rd Textures for visualization
         private Texture2Drd _rdTerrainHeight; // The Geometry (Terrain Shape)
         private Texture2Drd _rdLayerMask;     // The Data (Layer Influence/Delta)
-        //------------------------------------------
 
         public void Initialize(TerrainLayerBase owner)
         {
@@ -95,6 +93,7 @@ namespace Terrain3DTools.Visuals
                 _planeMesh.Size = new Vector2(_ownerLayer.Size.X, _ownerLayer.Size.Y);
 
                 // High subdivision allows the vertex shader to conform to the terrain shape
+                // TODO : Provide a property to allow more subdivisions
                 _planeMesh.SubdivideDepth = Mathf.Min(_ownerLayer.Size.Y, 256);
                 _planeMesh.SubdivideWidth = Mathf.Min(_ownerLayer.Size.X, 256);
             }
@@ -124,7 +123,6 @@ namespace Terrain3DTools.Visuals
             if (_ownerLayer is HeightLayer heightLayer)
             {
                 visualStrength = heightLayer.Strength;
-                // Optional: Handle subtract mode if you want red-displacement
                 if (heightLayer.Operation == HeightLayer.HeightOperation.Subtract)
                 {
                     visualStrength *= -1.0f;
@@ -168,4 +166,5 @@ namespace Terrain3DTools.Visuals
             }
         }
     }
+
 }
