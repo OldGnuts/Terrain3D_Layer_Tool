@@ -64,8 +64,7 @@ namespace Terrain3DTools.Masks
 
                 // 3. Define the combined sequence. This lambda accepts the compute list from the task manager.
                 Action<long> combinedCommands = (computeList) => {
-                    // REMOVED: Gpu.Rd.ComputeListBegin();
-
+                
                     // Step A: Add the copy command to the provided compute list.
                     Gpu.AddCopyTextureCommand(computeList, targetMaskTexture, temporaryTexture, (uint)maskWidth, (uint)maskHeight);
 
@@ -111,3 +110,4 @@ namespace Terrain3DTools.Masks
         }
     }
 }
+
