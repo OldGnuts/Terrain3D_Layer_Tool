@@ -1,4 +1,4 @@
-// /Core/Pipeline/TextureLayerMaskPhase.cs (FIXED - handles clearing)
+// /Core/Pipeline/TextureLayerMaskPhase.cs
 using Godot;
 using System.Collections.Generic;
 using System.Linq;
@@ -33,7 +33,7 @@ namespace Terrain3DTools.Pipeline
                     .Where(coord => context.CurrentlyActiveRegions.Contains(coord))
                     .ToList();
 
-                // NEW: If no active regions, create a task to clear the layer's texture
+                // If no active regions, create a task to clear the layer's texture
                 if (activeOverlappingRegions.Count == 0)
                 {
                     System.Action onComplete = () => 
