@@ -35,14 +35,12 @@ namespace Terrain3DTools.Layers
         /// <summary>
         /// Creates the GPU commands to apply this texture layer's effect to a region's control map.
         /// </summary>
-        // --- START OF CORRECTION ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyRegionCommands(
             Vector2I regionCoords,
             RegionData regionData,
             int regionSize,
             Vector2 regionMinWorld,
             Vector2 regionSizeWorld)
-        // --- END OF CORRECTION ---
         {
             if (!layerTextureRID.IsValid || !regionData.ControlMap.IsValid)
             {
@@ -58,7 +56,6 @@ namespace Terrain3DTools.Layers
             }
             var o = overlap.Value;
 
-            // --- CORRECTION: Removed 'using' statement ---
             var shaderPath = "res://addons/terrain_3d_tools/Shaders/Layers/TextureLayer.glsl";
             var operation = new AsyncComputeOperation(shaderPath);
 
