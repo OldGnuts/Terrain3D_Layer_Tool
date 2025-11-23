@@ -1,3 +1,4 @@
+// /Core/HeightDataStager.cs
 using System;
 using System.Linq;
 using Godot;
@@ -58,7 +59,7 @@ namespace Terrain3DTools.Core
             var result = new HeightStagingResult();
             var regionBounds = TerrainCoordinateHelper.GetRegionBoundsForLayer(layer, regionSize);
 
-            // --- REFACTORED: Find overlapping regions and their data in a single pass ---
+            // Find overlapping regions and their data in a single pass 
             var regionsToStage = new Dictionary<Vector2I, (RegionData data, OverlapResult overlap)>();
             for (int x = regionBounds.Position.X; x < regionBounds.End.X; x++)
                 for (int z = regionBounds.Position.Y; z < regionBounds.End.Y; z++)
@@ -75,7 +76,6 @@ namespace Terrain3DTools.Core
                         }
                     }
                 }
-            // --------------------------------------------------------------------------
 
             result.ActiveRegionCount = regionsToStage.Count;
             if (result.ActiveRegionCount == 0) return (null, result);
@@ -109,7 +109,6 @@ namespace Terrain3DTools.Core
                 int GetNeighborIndex(Vector2I offset) => coordToIndexMap.TryGetValue(coord + offset, out int index) ? index : -1;
                 metadataArray[sliceIndex] = new HeightStagingMetadata
                 {
-                    // ... (no changes to this struct initialization) ...
                     RegionWorldOffsetPx = coord * regionSize,
                     SourceStartPx = overlap.RegionMin,
                     TargetStartPx = overlap.MaskMin,
@@ -131,14 +130,11 @@ namespace Terrain3DTools.Core
             // These resources are passed to another task, which will take ownership and free them when it is complete.
             var resourcesToFree = new List<Rid>();
 
-            // --- NEW ---
             // This task "borrows" resources from the layer AND all of the RegionData
             // objects that it copies from.
             var owners = new List<object> { layer };
             owners.AddRange(regionsToStage.Values.Select(val => val.data));
-            // -----------
 
-            // --- UPDATED ---
             var task = new AsyncGpuTask(gpuCommands, null, resourcesToFree, owners, "Heightmap Stager", dependencies);
 
             return (task, result);
