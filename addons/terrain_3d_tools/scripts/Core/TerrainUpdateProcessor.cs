@@ -136,7 +136,7 @@ namespace Terrain3DTools.Core
             }
 
             // PHASE 2: Region Height Composites
-            // FIXED: Run whenever there are dirty regions, not just when layers are dirty
+            // Run whenever there are dirty regions, not just when layers are dirty
             // Position-only changes still need regions to recomposite with existing masks
             if (context.AllDirtyRegions.Count > 0)
             {
@@ -162,7 +162,7 @@ namespace Terrain3DTools.Core
             }
 
             // PHASE 4: Region Texture Composites
-            // FIXED: Same logic - run when regions are dirty
+            // run when regions are dirty
             if (context.AllDirtyRegions.Count > 0)
             {
                 DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase4_TextureComposite");
@@ -212,7 +212,7 @@ namespace Terrain3DTools.Core
 
         /// <summary>
         /// Gets statistics about the current processing context.
-        /// Useful for debugging and monitoring.
+        /// for debugging and monitoring.
         /// </summary>
         public ProcessingStats GetStats(TerrainProcessingContext context)
         {
@@ -260,4 +260,5 @@ namespace Terrain3DTools.Core
                    $"TM={TextureMaskTaskCount}, TC={TextureCompositeTaskCount}, FM={FeatureMaskTaskCount}";
         }
     }
+
 }
