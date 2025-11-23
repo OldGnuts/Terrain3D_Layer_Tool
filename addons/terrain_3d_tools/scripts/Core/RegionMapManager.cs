@@ -179,7 +179,7 @@ namespace Terrain3DTools.Core
         /// <summary>
         /// Removes a region and its associated resources.
         /// Returns true if the region was removed, false if it didn't exist.
-        /// IMPORTANT: Should only be called when region has no pending async operations.
+        /// Should only be called when region has no pending async operations.
         /// </summary>
         public bool RemoveRegion(Vector2I regionCoords)
         {
