@@ -41,8 +41,8 @@ namespace Terrain3DTools.Pipeline
                 if (activeOverlappingRegions.Count > 0)
                 {
                     // We depend on the composite results from the previous frame (or current if we re-ordered)
-                    // Note: Height layers generate masks *before* composite, so strictly speaking
-                    // they visualize the "Old" terrain height + "New" mask. This is usually acceptable.
+                    // Note: Height layers generate masks *before* composite,  
+                    // so they visualize the "Old" terrain height + "New" mask.
                     // If we need perfect sync, we'd need to re-architect to composite -> mask -> composite, which creates a cycle.
                     // For visualization, using the current region state is sufficient.
 
@@ -94,7 +94,6 @@ namespace Terrain3DTools.Pipeline
                     AsyncGpuTaskManager.Instance.AddTask(task);
                 }
             }
-
             return tasks;
         }
     }
