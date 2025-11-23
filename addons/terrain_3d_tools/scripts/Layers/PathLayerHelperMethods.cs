@@ -52,7 +52,7 @@ namespace Terrain3DTools.Layers
             var segments = new List<float>();
             var regionBounds = new Rect2(regionMinWorld, regionSizeWorld);
 
-            // IMPORTANT: Extend bounds significantly to capture segments that might affect this region
+            // Extend bounds significantly to capture segments that might affect this region
             // Use a generous buffer to avoid boundary artifacts
             float maxInfluence = Mathf.Max(_pathWidth, _embankmentWidth) + _embankmentFalloff;
             float boundaryBuffer = maxInfluence * 2.0f; // Double the influence for safety
