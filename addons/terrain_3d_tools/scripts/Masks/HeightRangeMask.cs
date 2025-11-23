@@ -1,4 +1,4 @@
-// /Masks/HeightRangeMask.cs (Corrected for Action<long>)
+// /Masks/HeightRangeMask.cs 
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -10,7 +10,6 @@ namespace Terrain3DTools.Masks
     [GlobalClass, Tool]
     public partial class HeightRangeMask : TerrainMask
     {
-        // ... (Properties and fields remain the same) ...
         #region Private Fields
         private float _minHeight = 0.0f;
         private float _maxHeight = 1.0f;
@@ -39,7 +38,6 @@ namespace Terrain3DTools.Masks
         public override MaskRequirements MaskDataRequirements() => UseBaseTerrainHeight ? MaskRequirements.RequiresHeightData : MaskRequirements.None;
         public override bool RequiresBaseHeightData() => UseBaseTerrainHeight;
         
-        // --- START OF CORRECTION FOR THE ENTIRE METHOD ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid())
         {
             if (UseBaseTerrainHeight)
@@ -104,9 +102,7 @@ namespace Terrain3DTools.Masks
             uint groupsX = (uint)((maskWidth + 7) / 8);
             uint groupsY = (uint)((maskHeight + 7) / 8);
 
-            // This now correctly returns an Action<long>
             return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), new List<string> { shaderPath });
         }
-        // --- END OF CORRECTION ---
     }
 }
