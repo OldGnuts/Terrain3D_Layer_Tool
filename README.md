@@ -4,7 +4,7 @@
 
 **A High-Performance, Non-Destructive Layer System for [Terrain3D](https://github.com/TokisanGames/Terrain3D) in Godot 4.5+ (C#).**
 
-Terrain3DTools transforms the standard destructive terrain workflow into a flexible, object-oriented layer system. Instead of permanently painting geometry or textures, you define mountains, rivers, biomes, and paths as independent nodes. The system composites these layers in real-time using an asynchronous GPU pipeline, synchronizing the result directly to the Terrain3D storage.
+Terrain3DTools transforms the standard destructive terrain workflow into a flexible, object-oriented layer system. Instead of permanently painting geometry or textures, you define mountains, rivers, biomes, and paths as independent nodes. The system composites these layers in real-time using an semi-asynchronous GPU pipeline, synchronizing the result directly to the Terrain3D storage.
 
 ## 🌟 Key Features
 
@@ -19,7 +19,7 @@ Terrain3DTools transforms the standard destructive terrain workflow into a flexi
 
 ## 🔄 Data Flow & Processing Lifecycle
 
-To understand Terrain3DTools, one must follow the data as it transforms from high-level C# objects into low-level GPU commands. The system operates on a "Pull" architecture triggered by dirty states. There may be confusion about async operations here. In fact the nature of the architecture is synchronous, however some operations are ran synchrounsly. Internally a DAG is built, and that dictates how synchronous the flow of data is.
+To understand Terrain3DTools, one must follow the data as it transforms from high-level C# objects into low-level GPU commands. The system operates on a "Pull" architecture triggered by dirty states. There may be confusion about async operations here. In fact the nature of the architecture is synchronous, however some operations are ran asynchrounsly. Internally a DAG is built, and that dictates how synchronous the flow of data is. It is more common when looking at profile that the system run synchronously, where batching is executed across many frames to reduce editor lag. This is a point of discussion, it will become obvious to anyone who understands the system.
 
 ### 1. The Trigger (Input & Scheduling)
 *   **User Action:** A user moves a `HeightLayer` or tweaks a `Mask` property.
