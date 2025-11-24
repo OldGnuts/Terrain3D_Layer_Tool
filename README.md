@@ -180,7 +180,7 @@ To illustrate, here is what happens when you drag a **Height Layer** node that s
 2.  **Spatial:** `RegionDependencyManager` identifies that regions `(0,0)` and `(1,0)` are under the mountain.
 3.  **Causal:** `LayerDependencyManager` sees a Texture Layer in those same regions. It knows the Texture Layer uses a `SlopeMask`. It marks the Texture Layer as dirty because the mountain's movement changes the slopes.
 4.  **Graph Building:**
-    *   **Task A:** Generate Height Mask for Mountain.
+    *   **Task A:** Generate Height Mask for Mountain, if mask parameters have changed.
     *   **Task B:** Composite Region Height (Depends on A).
     *   **Task C:** Generate Texture Mask (Depends on B). *The shader reads Task B's output to find the new slopes.*
     *   **Task D:** Composite Region Control Map (Depends on C).
