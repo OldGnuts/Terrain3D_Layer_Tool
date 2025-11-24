@@ -163,7 +163,7 @@ Just because we know *where* a change happened doesn't mean we know *who* is aff
 ## 3. Execution Dependencies ("The When")
 **Managed by:** `AsyncGpuTaskManager` & `TerrainUpdateProcessor`
 
-Once the system knows *what* to update, it builds a Directed Acyclic Graph (DAG) of GPU tasks. A task cannot start until its dependencies are resolved.
+Once the system knows *what* to update, it builds a Directed Acyclic Graph (DAG) of GPU tasks. A task cannot start until its dependencies are resolved. This is why the architecture cannot be fully async. Because it is non-destructive, it is synchrounous in nature. Perhaps a talking point is renaming the ASYNC classes to exclude the name ASYNC. Because we have all said that in discussions.
 
 *   **Wait/Signal Architecture:** Every `AsyncGpuTask` has a list of dependencies. The Task Manager holds a task in a "Pending" state until all its dependencies report `Completed`.
 *   **The Processing Chain:**
