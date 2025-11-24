@@ -9,7 +9,7 @@ Terrain3DTools transforms the standard destructive terrain workflow into a flexi
 ## 🌟 Key Features
 
 *   **Non-Destructive Workflow:** Treat terrain features as objects. Move a "Mountain" node, and the geometry and texturing update dynamically.
-*   **Async GPU Pipeline:** All masking, simulation, and compositing occur on the GPU via Godot's `RenderingDevice`, ensuring the editor remains responsive.
+*   **GPU Pipeline:** All masking, simulation, and compositing occur on the GPU via Godot's `RenderingDevice`, ensuring the editor remains responsive.
 *   **Control Map Architecture:** Manipulates Terrain3D's native bit-packed Control Map format (R32UI) rather than standard splatmaps, enabling complex material blending and property management per pixel.
 *   **Smart Region Optimization:** Divides the world into grid regions and employs dependency tracking to process only the specific regions affected by "dirty" layers.
 *   **Cascading Dependencies:** Moving a Height Layer automatically triggers updates for dependent Texture Layers (e.g., slope-based texturing) and Feature Layers (e.g., paths that conform to new heights).
