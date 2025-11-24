@@ -33,7 +33,7 @@ Before touching the GPU, the system calculates the "Blast Radius" of the change:
 3.  **Culling:** Regions with no active data are discarded to save processing time.
 
 ### 3. The Micro-Pipeline (`LayerMaskPipeline`)
-This is the factory that generates the specific GPU work for a single layer. When a layer updates, this pipeline builds an atomic `AsyncGpuTask` containing a sophisticated chain of command buffers:
+This is the factory that generates the specific GPU work for a single layer. If a layer is simply moved, it will not regenerate its mask chain unless the layer requires height data. IE: No mask exists in the mask chain that requires height data. Commonly texture layers require height data and they will always need regenation when moved. When a layer updates, this pipeline builds an atomic `AsyncGpuTask` containing a sophisticated chain of command buffers:
 
 1.  **Clear:** A compute dispatch clears the layer's internal temporary R32F texture.
 2.  **Context Stitching:** To calculate slope or erosion correctly, the layer needs to know about the terrain *outside* its bounds. The pipeline dispatches a "Stitch" shader that samples neighbor regions to build a seamless context buffer. If the layer does not need new height data, it will still stictch in order to present a visualization when required. This can be optimized for when a layer is selected in the editor, however it does not seem necessay.
