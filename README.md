@@ -19,10 +19,10 @@ Terrain3DTools transforms the standard destructive terrain workflow into a flexi
 
 ## 🔄 Data Flow & Processing Lifecycle
 
-To understand Terrain3DTools, one must follow the data as it transforms from high-level C# objects into low-level GPU commands. The system operates on a "Pull" architecture triggered by dirty states.
+To understand Terrain3DTools, one must follow the data as it transforms from high-level C# objects into low-level GPU commands. The system operates on a "Pull" architecture triggered by dirty states. There may be confusion about async operations here. In fact the nature of the architecture is synchronous, however some operations are ran synchrounsly. Internally a DAG is built, and that dictates how synchronous the flow of data is.
 
 ### 1. The Trigger (Input & Scheduling)
-*   **User Action:** A user moves a `HeightLayer` or tweaks a `NoiseMask` property.
+*   **User Action:** A user moves a `HeightLayer` or tweaks a `Mask` property.
 *   **Dirty Flags:** The node marks itself as `IsDirty`.
 *   **The Scheduler:** The `UpdateScheduler` monitors these flags. It intelligently differentiates between **Interactive Updates** (low latency while dragging) and **Full Updates** (high quality on mouse release), prioritizing editor frame rate.
 
@@ -36,7 +36,7 @@ Before touching the GPU, the system calculates the "Blast Radius" of the change:
 This is the factory that generates the specific GPU work for a single layer. When a layer updates, this pipeline builds an atomic `AsyncGpuTask` containing a sophisticated chain of command buffers:
 
 1.  **Clear:** A compute dispatch clears the layer's internal temporary R32F texture.
-2.  **Context Stitching:** To calculate slope or erosion correctly, the layer needs to know about the terrain *outside* its bounds. The pipeline dispatches a "Stitch" shader that samples neighbor regions to build a seamless context buffer.
+2.  **Context Stitching:** To calculate slope or erosion correctly, the layer needs to know about the terrain *outside* its bounds. The pipeline dispatches a "Stitch" shader that samples neighbor regions to build a seamless context buffer. If the layer does not need new height data, it will still stictch in order to present a visualization when required. This can be optimized for when a layer is selected in the editor, however it does not seem necessay.
 3.  **Mask Stacking:** It iterates through the layer's `Masks`. Each mask injects its own compute shader commands into the chain. **Barriers** are automatically injected to prevent Read-After-Write hazards.
 4.  **Falloff:** A final dispatch applies the edge fade curve.
 
