@@ -137,6 +137,7 @@ Terrain3DTools uses a **Three-Tier Dependency System** to ensure minimal process
 ## 1. Spatial Dependencies ("The Where")
 **Managed by:** `RegionDependencyManager`
 
+Todo: The system does not take into account the the vertex spacing. It does use the region size, however we have not implemented changing the underlying Terrain3D terrain specification. ...
 The terrain is divided into a grid of 256x256 regions. The first step is determining which of these regions are affected by a change.
 
 *   **AABB Intersection:** When a layer moves or resizes, the system calculates its Axis-Aligned Bounding Box (AABB) in world space.
