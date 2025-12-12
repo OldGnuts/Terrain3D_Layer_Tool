@@ -20,6 +20,7 @@ namespace Terrain3DTools.Pipeline
         public IReadOnlyCollection<Vector2I> CurrentlyActiveRegions { get; set; }
         public bool IsInteractiveResize { get; set; }
         public float WorldHeightScale { get; set; }
+        public TerrainLayerBase SelectedLayer { get; set; }
 
         // Shared resources
         public RegionMapManager RegionMapManager { get; set; }
@@ -32,6 +33,7 @@ namespace Terrain3DTools.Pipeline
         public Dictionary<TerrainLayerBase, AsyncGpuTask> TextureLayerMaskTasks { get; set; }
         public Dictionary<Vector2I, AsyncGpuTask> RegionTextureCompositeTasks { get; set; }
         public Dictionary<TerrainLayerBase, AsyncGpuTask> FeatureLayerMaskTasks { get; set; }
+        public Dictionary<Vector2I, AsyncGpuTask> RegionFeatureCompositeTasks { get; set; }
 
         public TerrainProcessingContext()
         {
@@ -40,6 +42,7 @@ namespace Terrain3DTools.Pipeline
             TextureLayerMaskTasks = new Dictionary<TerrainLayerBase, AsyncGpuTask>();
             RegionTextureCompositeTasks = new Dictionary<Vector2I, AsyncGpuTask>();
             FeatureLayerMaskTasks = new Dictionary<TerrainLayerBase, AsyncGpuTask>();
+            RegionFeatureCompositeTasks = new Dictionary<Vector2I, AsyncGpuTask>();
         }
     }
 }

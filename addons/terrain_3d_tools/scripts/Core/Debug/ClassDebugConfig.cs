@@ -14,6 +14,7 @@ namespace Terrain3DTools.Core.Debug
         {
             ResourceLocalToScene = true;
         }
+        // Remove [Export] attributes - we're handling exports in _GetPropertyList
         private string _className = "";
         private bool _enabled = true;
         private DebugCategory _enabledCategories = DebugCategory.None;
@@ -47,6 +48,9 @@ namespace Terrain3DTools.Core.Debug
                 NotifyPropertyListChanged();
             }
         }
+
+        // Parameterless constructor MUST exist for Godot to instantiate
+
 
         // Helper constructor for code
         public ClassDebugConfig(string className)
@@ -149,7 +153,7 @@ namespace Terrain3DTools.Core.Debug
                 .OrderBy(c => (uint)c)
                 .Select(c => c.ToString());
             string hintString = string.Join(",", categories);
-            GD.Print($"Generated DebugCategory Flags String: {hintString}");
+            //GD.Print($"Generated DebugCategory Flags String: {hintString}");
 
             return hintString;
         }

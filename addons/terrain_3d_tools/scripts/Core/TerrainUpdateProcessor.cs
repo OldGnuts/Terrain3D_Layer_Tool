@@ -20,13 +20,14 @@ namespace Terrain3DTools.Core
         private readonly RegionDependencyManager _regionDependencyManager;
         private readonly int _regionSize;
 
-        // Phase handlers
+
         private readonly HeightLayerMaskPhase _heightLayerMaskPhase;
         private readonly RegionHeightCompositePhase _regionHeightCompositePhase;
         private readonly TextureLayerMaskPhase _textureLayerMaskPhase;
         private readonly RegionTextureCompositePhase _regionTextureCompositePhase;
         private readonly FeatureLayerMaskPhase _featureLayerMaskPhase;
         private readonly FeatureLayerApplicationPhase _featureLayerApplicationPhase;
+        private readonly SelectedLayerVisualizationPhase _selectedLayerVisualizationPhase;
 
         public TerrainUpdateProcessor(
             RegionMapManager regionMapManager,
@@ -37,18 +38,20 @@ namespace Terrain3DTools.Core
             _regionDependencyManager = regionDependencyManager;
             _regionSize = regionSize;
 
-            // Initialize phase handlers
             _heightLayerMaskPhase = new HeightLayerMaskPhase();
             _regionHeightCompositePhase = new RegionHeightCompositePhase();
             _textureLayerMaskPhase = new TextureLayerMaskPhase();
             _regionTextureCompositePhase = new RegionTextureCompositePhase();
             _featureLayerMaskPhase = new FeatureLayerMaskPhase();
             _featureLayerApplicationPhase = new FeatureLayerApplicationPhase();
+            _selectedLayerVisualizationPhase = new SelectedLayerVisualizationPhase();
 
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
+
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
-                $"TerrainUpdateProcessor initialized with {6} phase handlers");
+                $"TerrainUpdateProcessor initialized with 7 phase handlers");
         }
+
 
         /// <summary>
         /// Processes terrain updates through a multi-phase async pipeline.
@@ -61,7 +64,8 @@ namespace Terrain3DTools.Core
             IEnumerable<TerrainLayerBase> dirtyFeatureLayers,
             IReadOnlyCollection<Vector2I> currentlyActiveRegions,
             bool isInteractiveResize,
-            float worldHeightScale)
+            float worldHeightScale,
+            TerrainLayerBase selectedLayer)
         {
             if (AsyncGpuTaskManager.Instance == null)
             {
@@ -84,7 +88,8 @@ namespace Terrain3DTools.Core
                 WorldHeightScale = worldHeightScale,
                 RegionMapManager = _regionMapManager,
                 RegionDependencyManager = _regionDependencyManager,
-                RegionSize = _regionSize
+                RegionSize = _regionSize,
+                SelectedLayer = selectedLayer
             };
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
@@ -162,7 +167,7 @@ namespace Terrain3DTools.Core
             }
 
             // PHASE 4: Region Texture Composites
-            // run when regions are dirty
+            // FIXED: Same logic - run when regions are dirty
             if (context.AllDirtyRegions.Count > 0)
             {
                 DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase4_TextureComposite");
@@ -198,6 +203,22 @@ namespace Terrain3DTools.Core
                     $"Phase 6 complete - feature application tasks created");
             }
 
+            // PHASE 7: Update Selected Layer Visualization
+            if (context.SelectedLayer != null)
+            {
+                DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                    "Phase7_SelectedLayerVisualization");
+
+                _selectedLayerVisualizationPhase.Execute(context);
+
+                DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                    "Phase7_SelectedLayerVisualization");
+            }
+            else
+            {
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Selected layer is null");
+            }
+
             // Log final task counts
             int totalTasks =
                 (context.HeightLayerMaskTasks?.Count ?? 0) +
@@ -212,7 +233,7 @@ namespace Terrain3DTools.Core
 
         /// <summary>
         /// Gets statistics about the current processing context.
-        /// for debugging and monitoring.
+        /// Useful for debugging and monitoring.
         /// </summary>
         public ProcessingStats GetStats(TerrainProcessingContext context)
         {
@@ -260,5 +281,4 @@ namespace Terrain3DTools.Core
                    $"TM={TextureMaskTaskCount}, TC={TextureCompositeTaskCount}, FM={FeatureMaskTaskCount}";
         }
     }
-
 }

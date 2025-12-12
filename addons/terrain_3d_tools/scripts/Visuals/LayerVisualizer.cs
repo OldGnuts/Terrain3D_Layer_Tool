@@ -2,6 +2,7 @@
 using Godot;
 using Terrain3DTools.Utils;
 using Terrain3DTools.Layers;
+using Terrain3DTools.Core;
 
 namespace Terrain3DTools.Visuals
 {
@@ -15,9 +16,11 @@ namespace Terrain3DTools.Visuals
         private bool _isSelected = false;
         private Vector2I _oldSize = Vector2I.Zero;
 
+        // -----------------------------------------
         // Rd Textures for visualization
         private Texture2Drd _rdTerrainHeight; // The Geometry (Terrain Shape)
         private Texture2Drd _rdLayerMask;     // The Data (Layer Influence/Delta)
+        //------------------------------------------
 
         public void Initialize(TerrainLayerBase owner)
         {
@@ -93,7 +96,6 @@ namespace Terrain3DTools.Visuals
                 _planeMesh.Size = new Vector2(_ownerLayer.Size.X, _ownerLayer.Size.Y);
 
                 // High subdivision allows the vertex shader to conform to the terrain shape
-                // TODO : Provide a property to allow more subdivisions
                 _planeMesh.SubdivideDepth = Mathf.Min(_ownerLayer.Size.Y, 256);
                 _planeMesh.SubdivideWidth = Mathf.Min(_ownerLayer.Size.X, 256);
             }
@@ -101,6 +103,7 @@ namespace Terrain3DTools.Visuals
             // 1. UPDATE GEOMETRY TEXTURE (Terrain Height)
             if (_ownerLayer.layerHeightVisualizationTextureRID.IsValid)
             {
+                GD.Print("Using height data");
                 UpdateSharedTexture(ref _rdTerrainHeight, _ownerLayer.layerHeightVisualizationTextureRID);
                 _shaderMat.SetShaderParameter("terrain_height_tex", _rdTerrainHeight);
                 _shaderMat.SetShaderParameter("use_terrain_height", true);
@@ -123,6 +126,7 @@ namespace Terrain3DTools.Visuals
             if (_ownerLayer is HeightLayer heightLayer)
             {
                 visualStrength = heightLayer.Strength;
+                // Optional: Handle subtract mode if you want red-displacement
                 if (heightLayer.Operation == HeightLayer.HeightOperation.Subtract)
                 {
                     visualStrength *= -1.0f;
@@ -160,11 +164,18 @@ namespace Terrain3DTools.Visuals
             _isSelected = selection.GetSelectedNodes().Contains(_ownerLayer);
             _visualMesh.Visible = _isSelected;
 
+            // Notify the manager about selection change
+            var manager = TerrainHeightQuery.GetTerrainLayerManager();
+            if (manager != null)
+            {
+                if (_isSelected)
+                    manager.SetSelectedLayer(_ownerLayer);
+            }
+
             if (_isSelected)
             {
                 UpdateVisuals();
             }
         }
     }
-
 }

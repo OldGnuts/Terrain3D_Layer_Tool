@@ -3,7 +3,8 @@
 using Godot;
 using System.Collections.Generic;
 using System.Linq;
-using Terrain3DWrapper;
+//using Terrain3DWrapper;
+using TokisanGames;
 using Terrain3DTools.Core.Debug;
 
 namespace Terrain3DTools.Core
@@ -312,12 +313,12 @@ namespace Terrain3DTools.Core
                 return;
             }
 
-            // Update maps
+            // Convert to terrain3d bindings
             if (pending.HeightImage != null)
-                t3DRegion.SetMapByType(MapType.Height, pending.HeightImage);
+                t3DRegion.SetMap(Terrain3DRegion.MapType.Height, pending.HeightImage);
 
             if (pending.ControlImage != null)
-                t3DRegion.SetMapByType(MapType.Control, pending.ControlImage);
+                t3DRegion.SetMap(Terrain3DRegion.MapType.Control, pending.ControlImage);
 
             t3DRegion.Edited = true;
 
@@ -369,13 +370,13 @@ namespace Terrain3DTools.Core
 
             }
             // Remove unused regions
-            List<Vector2I> regionLocations = t3DData.GetRegionLocations();
+            List<Vector2I> regionLocations = GetRegionLocations();
             int removedCount = 0;
             foreach (Vector2I regionLocation in regionLocations)
             {
                 if (!batch.AllActiveRegions.Contains(regionLocation))
                 {
-                    t3DData.RemoveRegionL(regionLocation, false);
+                    t3DData.RemoveRegionl(regionLocation, false);
                     removedCount++;
                 }
             }
@@ -383,7 +384,7 @@ namespace Terrain3DTools.Core
             // Final update
             try
             {
-                t3DData.UpdateMaps(0, true);
+                t3DData.UpdateMaps(Terrain3DRegion.MapType.Max, true);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
                     $"Finalized: removed {removedCount}, added {addedCount}");
@@ -433,5 +434,108 @@ namespace Terrain3DTools.Core
                    $"  Height scale: {_heightScale}\n" +
                    $"  Current batch: {(_currentBatch != null ? $"{_currentBatch.CompletedRegions.Count}/{_currentBatch.ExpectedRegions.Count}" : "None")}";
         }
+        #region Helpers
+        /// <summary>
+        /// Gets all region locations that currently exist in Terrain3D data.
+        /// </summary>
+        public System.Collections.Generic.List<Vector2I> GetRegionLocations()
+        {
+            var result = new System.Collections.Generic.List<Vector2I>();
+
+            // Terrain3D API: get_region_locations() returns Array of Vector2i
+            // Convert variant safe as list of V2I
+            var locations =  _terrain3D.Data.RegionLocations;
+
+            if (locations is Godot.Collections.Array array)
+            {
+                foreach (var item in array)
+                {
+                    if (item.SafeAsVector2I() is Vector2I location)
+                    {
+                        result.Add(location);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        
+        #endregion
     }
+
+    /// <summary>
+        /// Helper extension methods for safe Variant handling
+        /// </summary>
+        public static class VariantExtensions
+        {
+            public static string SafeAsString(this Variant variant, string fallback = "")
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsString() : fallback;
+            }
+
+            public static bool SafeAsBool(this Variant variant, bool fallback = false)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsBool() : fallback;
+            }
+
+            public static float SafeAsSingle(this Variant variant, float fallback = 0f)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsSingle() : fallback;
+            }
+
+            public static int SafeAsInt32(this Variant variant, int fallback = 0)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsInt32() : fallback;
+            }
+
+            public static uint SafeAsUInt32(this Variant variant, uint fallback = 0)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsUInt32() : fallback;
+            }
+
+            public static Vector3 SafeAsVector3(this Variant variant, Vector3 fallback = default)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsVector3() : fallback;
+            }
+
+            public static Vector2 SafeAsVector2(this Variant variant, Vector2 fallback = default)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsVector2() : fallback;
+            }
+
+            public static Vector2I SafeAsVector2I(this Variant variant, Vector2I fallback = default)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsVector2I() : fallback;
+            }
+
+            public static Color SafeAsColor(this Variant variant, Color fallback = default)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsColor() : fallback;
+            }
+
+            public static Aabb SafeAsAabb(this Variant variant, Aabb fallback = default)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.As<Aabb>() : fallback;
+            }
+
+            public static GodotObject SafeAsGodotObject(this Variant variant)
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.AsGodotObject() : null;
+            }
+
+            public static T SafeAs<[MustBeVariant] T>(this Variant variant, T fallback = default) where T : class
+            {
+                return variant.VariantType != Variant.Type.Nil ? variant.As<T>() : fallback;
+            }
+
+            public static T SafeAsGodotObject<T>(this Variant variant, T fallback = null) where T : GodotObject
+            {
+                if (variant.VariantType == Variant.Type.Nil)
+                    return fallback;
+
+                var obj = variant.AsGodotObject();
+                return obj is T result ? result : fallback;
+            }
+        }
 }

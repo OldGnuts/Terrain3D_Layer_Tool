@@ -1,4 +1,4 @@
-// /Pipeline/LayerMaskPipeline.cs
+// /Core/Pipeline/LayerMaskPipeline.cs
 using Godot;
 using Terrain3DTools.Core;
 using Terrain3DTools.Layers;
@@ -8,6 +8,17 @@ using System.Collections.Generic;
 
 namespace Terrain3DTools.Pipeline
 {
+    /// <summary>
+    /// Pipeline responsible for building layer mask textures from layer parameters and mask arrays.
+    /// This subsystem orchestrates the multi-step process of generating the final texture data
+    /// that represents a layer's influence pattern (height deltas, texture blend, or feature influence).
+    /// 
+    /// Pipeline stages:
+    /// 1. Clear texture to default value
+    /// 2. (Optional) Stitch heightmap context for masks that need terrain data
+    /// 3. Apply each mask in sequence
+    /// 4. Apply falloff attenuation
+    /// </summary>
     public static class LayerMaskPipeline
     {
         private const string DEBUG_CLASS_NAME = "LayerMaskPipeline";
@@ -17,12 +28,30 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
         }
 
+        /// <summary>
+        /// Creates an AsyncGpuTask to update a layer's texture from its masks and parameters.
+        /// This is the main entry point for height and texture layer mask generation.
+        /// </summary>
+        /// <param name="targetTexture">The layer's texture RID to write to</param>
+        /// <param name="layer">The layer containing masks and parameters</param>
+        /// <param name="maskWidth">Output texture width</param>
+        /// <param name="maskHeight">Output texture height</param>
+        /// <param name="heightmapArray">Optional texture array of region heightmaps for context</param>
+        /// <param name="metadataBuffer">Optional metadata buffer for heightmap stitching</param>
+        /// <param name="regionCountInArray">Number of regions in the heightmap array</param>
+        /// <param name="dependencies">Tasks that must complete before this layer processes</param>
+        /// <param name="onCompleteCallback">Callback to invoke when processing completes</param>
+        /// <returns>AsyncGpuTask or null if creation failed</returns>
         public static AsyncGpuTask CreateUpdateLayerTextureTask(
-            Rid targetTexture, TerrainLayerBase layer, int maskWidth, int maskHeight,
-            Rid heightmapArray, Rid metadataBuffer, int regionCountInArray,
+            Rid targetTexture,
+            TerrainLayerBase layer,
+            int maskWidth,
+            int maskHeight,
+            Rid heightmapArray,
+            Rid metadataBuffer,
+            int regionCountInArray,
             List<AsyncGpuTask> dependencies,
-            Action onCompleteCallback
-        )
+            Action onCompleteCallback)
         {
             if (!targetTexture.IsValid)
             {
@@ -34,17 +63,16 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
                 $"CreateMaskTask:{layer.LayerName}");
 
-            // This holds actions that accept a compute list handle.
             var allGpuCommands = new List<Action<long>>();
             var allTempRids = new List<Rid>();
             var allShaderPaths = new List<string>();
-
             int operationCount = 0;
 
-            // STEP 1: CLEAR TEXTURE
             Color clearColor = layer.GetLayerType() == LayerType.Height ? Colors.White : Colors.Black;
 
-            var (clearCmd, clearRids, clearShaderPath) = CreateClearCommands(targetTexture, maskWidth, maskHeight, clearColor);
+            var (clearCmd, clearRids, clearShaderPath) = GpuKernels.CreateClearCommands(
+                targetTexture, clearColor, maskWidth, maskHeight, DEBUG_CLASS_NAME);
+
             if (clearCmd != null)
             {
                 allShaderPaths.Add(clearShaderPath);
@@ -56,14 +84,20 @@ namespace Terrain3DTools.Pipeline
                     $"Layer '{layer.LayerName}' - Added clear operation");
             }
 
-            // STEP 2: PRE-STITCHING HEIGHTMAP (for texture layers that need height data, and layer visualztion)
             Rid stitchedHeightmap = new Rid();
-            if (heightmapArray.IsValid && regionCountInArray > 0 && layer.layerHeightVisualizationTextureRID.IsValid)
+            if (heightmapArray.IsValid &&
+                regionCountInArray > 0 &&
+                layer.layerHeightVisualizationTextureRID.IsValid &&
+                layer.DoesAnyMaskRequireHeightData())
             {
                 stitchedHeightmap = layer.layerHeightVisualizationTextureRID;
 
-                // 2a. Clear the visualization texture first
-                var (stitchClearCmd, stitchClearRids, stitchClearShaderPath) = CreateClearCommands(stitchedHeightmap, maskWidth, maskHeight, Colors.Black);
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.ShaderOperations,
+                    $"Generating height data from {regionCountInArray} overlapping regions for layer.");
+
+                var (stitchClearCmd, stitchClearRids, stitchClearShaderPath) = GpuKernels.CreateClearCommands(
+                    stitchedHeightmap, Colors.Black, maskWidth, maskHeight, DEBUG_CLASS_NAME);
+
                 if (stitchClearCmd != null)
                 {
                     allShaderPaths.Add(stitchClearShaderPath);
@@ -72,15 +106,14 @@ namespace Terrain3DTools.Pipeline
                     operationCount++;
                 }
 
-                // 2b. Run the stitch compute shader
-                var (stitchCmd, stitchRids, stitchShaderPath) = CreateStitchHeightmapCommands(
+                var (stitchCmd, stitchRids, stitchShaderPath) = GpuKernels.CreateStitchHeightmapCommands(
                     stitchedHeightmap,
                     heightmapArray,
                     metadataBuffer,
                     maskWidth,
                     maskHeight,
-                    regionCountInArray
-                );
+                    regionCountInArray,
+                    DEBUG_CLASS_NAME);
 
                 if (stitchCmd != null)
                 {
@@ -89,19 +122,14 @@ namespace Terrain3DTools.Pipeline
                     allTempRids.AddRange(stitchRids);
                     operationCount++;
 
-                    // Clean up the staging resources created by the Stager
                     allTempRids.Add(heightmapArray);
                     allTempRids.Add(metadataBuffer);
 
-                    if (DebugManager.Instance != null)
-                    {
-                        DebugManager.Instance.Log(DEBUG_CLASS_NAME, DebugCategory.MaskSetup,
-                        $"Layer '{layer.LayerName}' - Stitched heightmap for visualization/processing");
-                    }
+                    DebugManager.Instance.Log(DEBUG_CLASS_NAME, DebugCategory.ShaderOperations,
+                        $"Layer '{layer.LayerName}' - Stitched heightmap for mask processing");
                 }
             }
 
-            // STEP 3: MASK APPLICATION
             int maskCount = layer.Masks.Count;
             if (maskCount > 0)
             {
@@ -113,12 +141,14 @@ namespace Terrain3DTools.Pipeline
             {
                 if (mask != null)
                 {
-                    var (maskCmd, maskRids, maskShaderPath) = mask.CreateApplyCommands(targetTexture, maskWidth, maskHeight, stitchedHeightmap);
+                    var (maskCmd, maskRids, maskShaderPaths) = mask.CreateApplyCommands(
+                        targetTexture, maskWidth, maskHeight, stitchedHeightmap);
+
                     if (maskCmd != null)
                     {
-                        foreach (string s in maskShaderPath)
+                        foreach (string shader in maskShaderPaths)
                         {
-                            allShaderPaths.Add(s);
+                            allShaderPaths.Add(shader);
                         }
                         allGpuCommands.Add(maskCmd);
                         allTempRids.AddRange(maskRids);
@@ -130,8 +160,9 @@ namespace Terrain3DTools.Pipeline
                 }
             }
 
-            // STEP 4: FALLOFF APPLICATION
-            var (falloffCmd, falloffRids, falloffShaderPath) = CreateFalloffCommands(layer, targetTexture, maskWidth, maskHeight);
+            var (falloffCmd, falloffRids, falloffShaderPath) = GpuKernels.CreateFalloffCommands(
+                layer, targetTexture, maskWidth, maskHeight);
+
             if (falloffCmd != null)
             {
                 allGpuCommands.Add(falloffCmd);
@@ -152,22 +183,25 @@ namespace Terrain3DTools.Pipeline
                 return null;
             }
 
-            // The combined command accepts the computeList and passes it to each sub-command.
             Action<long> combinedGpuCommands = (computeList) =>
             {
                 if (allGpuCommands.Count == 0) return;
 
-                // Execute all commands with proper barriers
+                // Barrier BEFORE first command (critical!)
+                // Ensures any previous work on this texture is complete
+                Gpu.Rd.ComputeListAddBarrier(computeList);
+
                 for (int i = 0; i < allGpuCommands.Count; i++)
                 {
-                    // Add barrier between operations
-                    {
-                        Gpu.Rd.ComputeListAddBarrier(computeList);
-                    }
-
                     try
                     {
                         allGpuCommands[i]?.Invoke(computeList);
+                        
+                        // Barrier AFTER each command (except last)
+                        if (i < allGpuCommands.Count - 1)
+                        {
+                            Gpu.Rd.ComputeListAddBarrier(computeList);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -179,7 +213,7 @@ namespace Terrain3DTools.Pipeline
             };
 
             var owners = new List<object> { layer };
-            string taskName = layer.GetLayerType() == LayerType.Height ? "Height" : "Texture";
+            string taskName = layer.GetLayerType() == LayerType.Height ? "Height Layer Mask" : "Texture Layer Mask";
 
             DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
                 $"CreateMaskTask:{layer.LayerName}");
@@ -187,9 +221,27 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
                 $"Layer '{layer.LayerName}' - Mask task created: {operationCount} operations, {allTempRids.Count} temp resources, {allShaderPaths.Count} shaders");
 
-            return new AsyncGpuTask(combinedGpuCommands, onCompleteCallback, allTempRids, owners, taskName, dependencies, allShaderPaths);
+            return new AsyncGpuTask(
+                combinedGpuCommands,
+                onCompleteCallback,
+                allTempRids,
+                owners,
+                taskName,
+                dependencies,
+                allShaderPaths);
         }
 
+        /// <summary>
+        /// Creates an AsyncGpuTask to update a feature layer's texture.
+        /// Feature layers have specialized processing that differs from height/texture layers.
+        /// </summary>
+        /// <param name="targetTexture">The feature layer's texture RID</param>
+        /// <param name="featureLayer">The feature layer to process</param>
+        /// <param name="maskWidth">Output texture width</param>
+        /// <param name="maskHeight">Output texture height</param>
+        /// <param name="dependencies">Tasks that must complete before processing</param>
+        /// <param name="onCompleteCallback">Callback to invoke when complete</param>
+        /// <returns>AsyncGpuTask or null if creation failed</returns>
         public static AsyncGpuTask CreateUpdateFeatureLayerTextureTask(
             Rid targetTexture,
             FeatureLayer featureLayer,
@@ -208,25 +260,29 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
                 $"CreateFeatureMask:{featureLayer.LayerName}");
 
-            // Feature layers may need special handling based on type
+            AsyncGpuTask task = null;
+
             if (featureLayer is PathLayer pathLayer)
             {
-                var task = CreatePathLayerMaskTask(targetTexture, pathLayer, maskWidth, maskHeight, dependencies, onCompleteCallback);
-
-                DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
-                    $"CreateFeatureMask:{featureLayer.LayerName}");
-
-                return task;
+                task = CreatePathLayerMaskTask(
+                    targetTexture, pathLayer, maskWidth, maskHeight, dependencies, onCompleteCallback);
+            }
+            else
+            {
+                DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
+                    $"Unknown feature layer type: {featureLayer.GetType().Name}");
             }
 
-            DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
-                $"Unknown feature layer type: {featureLayer.GetType().Name}");
             DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
                 $"CreateFeatureMask:{featureLayer.LayerName}");
 
-            return null;
+            return task;
         }
 
+        /// <summary>
+        /// Creates a mask generation task specifically for path layers.
+        /// Path layers generate both height data and influence masks through specialized shaders.
+        /// </summary>
         private static AsyncGpuTask CreatePathLayerMaskTask(
             Rid targetTexture,
             PathLayer pathLayer,
@@ -243,9 +299,8 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskSetup,
                 $"PathLayer '{pathLayer.LayerName}' - Creating path mask task");
 
-            // Step 1: Clear mask texture
-            var (clearCmd, clearRids, clearShaderPath) = CreateClearCommands(
-                targetTexture, maskWidth, maskHeight, Colors.Black);
+            var (clearCmd, clearRids, clearShaderPath) = GpuKernels.CreateClearCommands(
+                targetTexture, Colors.Black, maskWidth, maskHeight, DEBUG_CLASS_NAME);
 
             if (clearCmd != null)
             {
@@ -255,7 +310,6 @@ namespace Terrain3DTools.Pipeline
                 operationCount++;
             }
 
-            // Step 2: Generate height data texture (separate from mask)
             var (heightCmd, heightRids, heightShaderPaths) = pathLayer.CreatePathHeightDataCommands();
 
             if (heightCmd != null)
@@ -269,7 +323,6 @@ namespace Terrain3DTools.Pipeline
                     $"PathLayer '{pathLayer.LayerName}' - Added height data generation");
             }
 
-            // Step 3: Rasterize path influence into mask
             var (pathCmd, pathRids, pathShaderPaths) = pathLayer.CreatePathMaskCommands();
 
             if (pathCmd != null)
@@ -283,7 +336,6 @@ namespace Terrain3DTools.Pipeline
                     $"PathLayer '{pathLayer.LayerName}' - Added path rasterization");
             }
 
-            // Step 4: Apply user masks (only affects influence, not height)
             int maskCount = pathLayer.Masks.Count;
             if (maskCount > 0)
             {
@@ -302,17 +354,16 @@ namespace Terrain3DTools.Pipeline
                     {
                         allGpuCommands.Add(maskCmd);
                         allTempRids.AddRange(maskRids);
-                        foreach (string s in maskShaderPaths)
+                        foreach (string shader in maskShaderPaths)
                         {
-                            allShaderPaths.Add(s);
+                            allShaderPaths.Add(shader);
                         }
                         operationCount++;
                     }
                 }
             }
 
-            // Step 5: Apply falloff (only affects influence, not height)
-            var (falloffCmd, falloffRids, falloffShaderPath) = CreateFalloffCommands(
+            var (falloffCmd, falloffRids, falloffShaderPath) = GpuKernels.CreateFalloffCommands(
                 pathLayer, targetTexture, maskWidth, maskHeight);
 
             if (falloffCmd != null)
@@ -333,32 +384,14 @@ namespace Terrain3DTools.Pipeline
                 return null;
             }
 
-            Action<long> combinedGpuCommands = (computeList) =>
-            {
-                for (int i = 0; i < allGpuCommands.Count; i++)
-                {
-                    if (i > 0)
-                    {
-                        Gpu.Rd.ComputeListAddBarrier(computeList);
-                    }
-
-                    try
-                    {
-                        allGpuCommands[i]?.Invoke(computeList);
-                    }
-                    catch (Exception ex)
-                    {
-                        DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                            $"PathLayer '{pathLayer.LayerName}' - Failed to execute path mask command {i}: {ex.Message}");
-                        break;
-                    }
-                }
-            };
+            Action<long> combinedGpuCommands = GpuCommandBuilder.CombineCommands(
+                allGpuCommands, false, DEBUG_CLASS_NAME);
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
                 $"PathLayer '{pathLayer.LayerName}' - Path mask task created: {operationCount} operations, {allTempRids.Count} temp resources");
 
             var owners = new List<object> { pathLayer };
+
             return new AsyncGpuTask(
                 combinedGpuCommands,
                 onCompleteCallback,
@@ -367,120 +400,6 @@ namespace Terrain3DTools.Pipeline
                 "PathLayer Mask Generation",
                 dependencies,
                 allShaderPaths);
-        }
-
-        private static (Action<long>, List<Rid>, string) CreateStitchHeightmapCommands(Rid stitchedHeightmap, Rid heightmapArray, Rid metadataBuffer, int maskWidth, int maskHeight, int regionCountInArray)
-        {
-            var shaderPath = "res://addons/terrain_3d_tools/Shaders/Pipeline/stitch_heightmap.glsl";
-            var operation = new AsyncComputeOperation(shaderPath);
-
-            if (!heightmapArray.IsValid)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    "Invalid heightmapArray for stitch operation");
-                return (null, new List<Rid>(), shaderPath);
-            }
-            if (!metadataBuffer.IsValid)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    "Invalid metadataBuffer for stitch operation");
-                return (null, new List<Rid>(), shaderPath);
-            }
-            if (!stitchedHeightmap.IsValid)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    "Invalid stitchedHeightmap for stitch operation");
-                return (null, new List<Rid>(), shaderPath);
-            }
-
-            try
-            {
-                operation.BindSamplerWithTextureArray(0, heightmapArray);  // CombinedSampler at binding 0
-                operation.BindStorageBuffer(1, metadataBuffer);             // StorageBuffer at binding 1  
-                operation.BindStorageImage(2, stitchedHeightmap);           // Image at binding 2
-
-                operation.SetPushConstants(new byte[0]);
-                uint groupsX = (uint)((maskWidth + 7) / 8);
-                uint groupsY = (uint)((maskHeight + 7) / 8);
-
-                var dispatchCmd = operation.CreateDispatchCommands(groupsX, groupsY, (uint)regionCountInArray);
-
-                return (dispatchCmd, operation.GetTemporaryRids(), shaderPath);
-            }
-            catch (Exception ex)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to create stitch heightmap commands: {ex.Message}");
-                return (null, new List<Rid>(), shaderPath);
-            }
-        }
-
-        private static (Action<long>, List<Rid>, string) CreateFalloffCommands(TerrainLayerBase layer, Rid layerTex, int maskWidth, int maskHeight)
-        {
-            if (layer.FalloffMode == FalloffType.None || layer.FalloffStrength <= 0.0f)
-                return (null, new List<Rid>(), "");
-
-            var shaderPath = "res://addons/terrain_3d_tools/Shaders/Masks/falloff.glsl";
-            var operation = new AsyncComputeOperation(shaderPath);
-
-            operation.BindStorageImage(0, layerTex);
-
-            const int Resolution = 256;
-            var curve = layer.FalloffCurve ?? new Curve();
-            if (curve.PointCount == 0) { curve.AddPoint(new Vector2(0, 0)); curve.AddPoint(new Vector2(1, 1)); }
-            curve.Bake();
-
-            float[] curveValues = new float[Resolution];
-            for (int i = 0; i < Resolution; i++)
-            {
-                float t = (float)i / (Resolution - 1);
-                curveValues[i] = Mathf.Clamp(curve.SampleBaked(t), 0f, 1f);
-            }
-
-            int pointCount = Resolution;
-            byte[] pointCountBytes = BitConverter.GetBytes(pointCount);
-            byte[] valuesBytes = GpuUtils.FloatArrayToBytes(curveValues);
-            byte[] bufferBytes = new byte[pointCountBytes.Length + valuesBytes.Length];
-            Buffer.BlockCopy(pointCountBytes, 0, bufferBytes, 0, pointCountBytes.Length);
-            Buffer.BlockCopy(valuesBytes, 0, bufferBytes, pointCountBytes.Length, valuesBytes.Length);
-
-            operation.BindTemporaryStorageBuffer(1, bufferBytes);
-
-            var pushConstants = GpuUtils.CreatePushConstants()
-                .Add((int)layer.FalloffMode)
-                .Add(layer.FalloffStrength)
-                .Add((float)layer.Size.X)
-                .Add((float)layer.Size.Y)
-                .Build();
-            operation.SetPushConstants(pushConstants);
-
-            uint groupsX = (uint)((maskWidth + 7) / 8);
-            uint groupsY = (uint)((maskHeight + 7) / 8);
-
-            return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), shaderPath);
-        }
-
-        private static (Action<long>, List<Rid>, string) CreateClearCommands(Rid targetTexture, int width, int height, Color clearColor)
-        {
-            if (!targetTexture.IsValid)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    "Cannot create clear commands for invalid texture");
-                return (null, new List<Rid>(), "");
-            }
-
-            var shaderPath = "res://addons/terrain_3d_tools/Shaders/Utils/ClearRegion.glsl";
-            var operation = new AsyncComputeOperation(shaderPath);
-
-            operation.BindStorageImage(0, targetTexture);
-
-            var pushConstants = GpuUtils.CreatePushConstants().Add(clearColor).Build();
-            operation.SetPushConstants(pushConstants);
-
-            uint groupsX = (uint)((width + 7) / 8);
-            uint groupsY = (uint)((height + 7) / 8);
-
-            return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), shaderPath);
         }
     }
 }
