@@ -6,6 +6,7 @@ using Terrain3DTools.Core.Debug;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Utils;
 using System.Linq;
+using System.Runtime.Serialization.Formatters;
 
 namespace Terrain3DTools.Core
 {
@@ -35,10 +36,10 @@ namespace Terrain3DTools.Core
         private HashSet<Vector2I> _regionsProcessedThisUpdate = new();
         private List<Vector2I> _regionsToRemoveAfterPush = new();
         private float _worldHeight = 128;
-
         private bool _isInitialized = false;
         private bool _SyncedWithTerrain3D = false;
         private AsyncGpuTaskManager _taskManagerInstance;
+        private TerrainLayerBase _selectedLayer;
 
         [Export]
         public bool AutoPushToTerrain { get; set; } = false;
@@ -79,7 +80,7 @@ namespace Terrain3DTools.Core
         /// <summary>
         /// Gets the mesh vertex spacing from the connected Terrain3D node.
         /// </summary>
-        public float TerrainVertexSpacing => _terrain3DConnector?.MeshVertexSpacing ?? 0f;
+        public double TerrainVertexSpacing => _terrain3DConnector?.MeshVertexSpacing ?? 0f;
 
         /// <summary>
         /// Gets or sets the Terrain3D node to connect to.
@@ -94,8 +95,11 @@ namespace Terrain3DTools.Core
                 {
                     _terrain3DConnector = new Terrain3DConnector(Owner);
                 }
-                _terrain3DConnector.Terrain3DNode = value;
-                OnTerrain3DConnectionChanged();
+                if (IsInstanceValid(value))
+                {
+                    _terrain3DConnector.Terrain3DNode = value;
+                    OnTerrain3DConnectionChanged();
+                }
             }
         }
 
@@ -104,6 +108,16 @@ namespace Terrain3DTools.Core
         /// </summary>
         [Export]
         public float WorldHeightScale { get => _worldHeight; set => _worldHeight = value; }
+
+        public void SetSelectedLayer(TerrainLayerBase layer)
+        {
+            _selectedLayer = layer;
+            _updateScheduler?.SignalChanges(); // Trigger update to refresh visualization
+            DebugManager.Instance?.Log( DEBUG_CLASS, DebugCategory.Initialization, "Selected layer " + _selectedLayer);
+        }
+
+        public TerrainLayerBase GetSelectedLayer() => _selectedLayer;
+
         #endregion
 
         #region Debug System Fields
@@ -272,7 +286,7 @@ namespace Terrain3DTools.Core
             _updateScheduler = new UpdateScheduler();
             _terrain3DConnector = new Terrain3DConnector(Owner);
 
-            AutoAssignTerrain3D();
+            //AutoAssignTerrain3D();
             _isInitialized = true;
 
             DebugManager.Instance?.EndTimer(DEBUG_CLASS, DebugCategory.Initialization, "InitializeManager");
@@ -298,7 +312,7 @@ namespace Terrain3DTools.Core
                 Owner);
 
             // Region previews do not need to be enabled if we are updating the terrain system in real-time
-            _regionMapManager.SetPreviewsEnabled(_enableRegionPreviews); 
+            _regionMapManager.SetPreviewsEnabled(_enableRegionPreviews);
 
             _regionDependencyManager = new RegionDependencyManager(Terrain3DRegionSize, new Vector2I(-16, 15));
 
@@ -396,6 +410,7 @@ namespace Terrain3DTools.Core
             // === VALIDATION ===
             if (!_terrain3DConnector.ValidateConnection())
             {
+                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Validation, $"Terrain3D connection not validated");
                 AutoAssignTerrain3D();
                 if (!_terrain3DConnector.IsConnected) return;
             }
@@ -523,7 +538,8 @@ namespace Terrain3DTools.Core
                 dirtyFeatureLayers,
                 _regionDependencyManager.GetActiveRegionCoords(),
                 isInteractiveResize,
-                _worldHeight
+                _worldHeight,
+                _selectedLayer
             );
 
             // === PHASE 6: UPDATE STATE ===
@@ -655,4 +671,5 @@ namespace Terrain3DTools.Core
 
         #endregion
     }
+
 }
