@@ -1,6 +1,7 @@
 // /Core/Terrain3DConnector.cs
 using Godot;
-using Terrain3DWrapper;
+using TokisanGames;
+using Terrain3DTools.Core.Debug;
 
 namespace Terrain3DTools.Core
 {
@@ -8,8 +9,10 @@ namespace Terrain3DTools.Core
     /// Manages the connection to the Terrain3D node, including auto-discovery,
     /// validation, and providing access to Terrain3D properties.
     /// </summary>
+    [Tool]
     public class Terrain3DConnector
     {
+        private const string DEBUG_CLASS_NAME = "Terrain3DConnector";
         private Node3D _terrain3DNode;
         private Terrain3D _terrain3D;
         private readonly Node _ownerNode;
@@ -17,6 +20,9 @@ namespace Terrain3DTools.Core
         public Terrain3DConnector(Node ownerNode)
         {
             _ownerNode = ownerNode;
+            DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
+                $"Terrain3DConnector created");
         }
 
         #region Properties
@@ -40,14 +46,14 @@ namespace Terrain3DTools.Core
         public bool IsConnected => _terrain3D != null && _terrain3DNode != null;
 
         /// <summary>
-        /// The region size from Terrain3D. Returns 0 if not connected.
+        /// The region size from Terrain3D. Returns 0 if not terrain3d is not present or valid.
         /// </summary>
-        public int RegionSize => _terrain3D?.RegionSize ?? 0;
+        public int RegionSize => _terrain3D?.RegionSize.SafeAsInt32() ?? 0;
 
         /// <summary>
-        /// The mesh vertex spacing from Terrain3D. Returns 0 if not connected.
+        /// The mesh vertex spacing from Terrain3D. Returns 0 if not terrain3d is not present or valid.
         /// </summary>
-        public float MeshVertexSpacing => _terrain3D?.MeshVertexSpacing ?? 0f;
+        public double MeshVertexSpacing => _terrain3D?.VertexSpacing ?? 0f;
         #endregion
 
         #region Connection Management
@@ -59,21 +65,25 @@ namespace Terrain3DTools.Core
         {
             if (_ownerNode == null)
             {
-                GD.PrintErr("[Terrain3DConnector] Cannot auto-connect: owner node is null");
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME, $"Cannot auto-connect: owner node is null");
                 return false;
             }
 
             var nodes = _ownerNode.FindChildren("*", "Terrain3D");
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization, 
+                $"Attempting to connect to Terrain3D. Found {nodes.Count} nodes.");
             if (nodes.Count > 0)
             {
                 var foundNode = nodes[0] as Node3D;
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization, $"Auto-connecting to Terrain3D node: {foundNode.Name}");
                 if (foundNode != null)
                 {
                     Terrain3DNode = foundNode;
-                    
+
                     if (IsConnected)
                     {
-                        GD.Print($"[Terrain3DConnector] Auto-connected to Terrain3D node: {foundNode.Name}");
+                        DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
+                            $"Auto-connected to Terrain3D node: {foundNode.Name}");
                         return true;
                     }
                 }
@@ -93,7 +103,8 @@ namespace Terrain3DTools.Core
 
             if (!GodotObject.IsInstanceValid(_terrain3DNode))
             {
-                GD.PrintErr("[Terrain3DConnector] Terrain3D node is no longer valid");
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                $"Terrain3D node is no longer valid");
                 Disconnect();
                 return false;
             }
@@ -124,27 +135,35 @@ namespace Terrain3DTools.Core
                 return;
             }
 
-            // Validate the node is actually a Terrain3D
+            /* ** Removed to update to using Terrain3D binding 
+                Validate the node is actually a Terrain3D
             if (!Terrain3DNodeVerifier.CheckTerrain3D(value))
             {
                 GD.PrintErr($"[Terrain3DConnector] Node '{value.Name}' is not a valid Terrain3D node");
                 Disconnect();
                 return;
             }
+            */
 
             // Connect to the new node
+            // Updated to use Terrain3D bindings
             _terrain3DNode = value;
-            _terrain3D = new Terrain3D(_terrain3DNode as GodotObject);
+            GodotObject godotObject = _terrain3DNode as GodotObject;
+            _terrain3D = Terrain3D.Bind(value as Terrain3D);
 
             if (IsConnected)
             {
-                GD.Print($"[Terrain3DConnector] Connected to Terrain3D node: {value.Name}");
-                GD.Print($"  Region Size: {RegionSize}");
-                GD.Print($"  Vertex Spacing: {MeshVertexSpacing}");
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
+                    $"Connected to Terrain3D node: {value.Name}");
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
+                    $"  Region Size: {RegionSize}");
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
+                    $"  Vertex Spacing: {MeshVertexSpacing}");
             }
             else
             {
-                GD.PrintErr("[Terrain3DConnector] Failed to create Terrain3D wrapper");
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Failed to connect to Terrain3D");
                 Disconnect();
             }
         }
