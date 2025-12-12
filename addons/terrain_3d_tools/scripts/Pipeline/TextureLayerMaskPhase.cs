@@ -5,25 +5,36 @@ using System.Linq;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Core;
 using Terrain3DTools.Utils;
+using Terrain3DTools.Core.Debug;
 
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 3: Generates mask textures for all dirty texture layers.
-    /// Texture layers may depend on height data for masks that use height-based logic.
-    /// Depends on: RegionHeightCompositePhase (conditionally)
+    /// Texture layers control material blending and painting on the terrain surface.
+    /// Some texture layer masks may require height data for slope-based or elevation-based
+    /// masking operations, which requires staging heightmaps from composited regions.
     /// </summary>
     public class TextureLayerMaskPhase : IProcessingPhase
     {
+        private const string DEBUG_CLASS_NAME = "TextureLayerMaskPhase";
+
+        public TextureLayerMaskPhase()
+        {
+            DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
+        }
+
         public Dictionary<object, AsyncGpuTask> Execute(TerrainProcessingContext context)
         {
             var tasks = new Dictionary<object, AsyncGpuTask>();
+
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                $"Processing {context.DirtyTextureLayers.Count} texture layer(s)");
 
             foreach (var layer in context.DirtyTextureLayers)
             {
                 if (!GodotObject.IsInstanceValid(layer)) continue;
 
-                // Check if this texture layer overlaps with any active (processable) regions
                 var overlappingRegionCoords = TerrainCoordinateHelper
                     .GetRegionBoundsForLayer(layer, context.RegionSize)
                     .GetRegionCoords()
@@ -33,17 +44,12 @@ namespace Terrain3DTools.Pipeline
                     .Where(coord => context.CurrentlyActiveRegions.Contains(coord))
                     .ToList();
 
-                // If no active regions, create a task to clear the layer's texture
                 if (activeOverlappingRegions.Count == 0)
                 {
-                    System.Action onComplete = () => 
-                    { 
-                        if (GodotObject.IsInstanceValid(layer)) 
-                            layer.Visualizer.Update(); 
-                    };
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
+                        $"Layer '{layer.LayerName}' has no active regions - creating clear task");
 
-                    // Create a clear task for this layer
-                    var clearTask = CreateClearLayerTextureTask(layer, onComplete);
+                    var clearTask = CreateClearLayerTextureTask(layer);
                     
                     if (clearTask != null)
                     {
@@ -60,9 +66,11 @@ namespace Terrain3DTools.Pipeline
                 Rid metadataBufferRid = new Rid();
                 int activeRegionCount = 0;
 
-                // If this layer needs height data for its mask generation
                 if (layer.DoesAnyMaskRequireHeightData())
                 {
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
+                        $"Layer '{layer.LayerName}' requires height data - staging from {activeOverlappingRegions.Count} regions");
+
                     var compositeDependencies = activeOverlappingRegions
                         .Where(rc => context.RegionHeightCompositeTasks.ContainsKey(rc))
                         .Select(rc => context.RegionHeightCompositeTasks[rc])
@@ -84,14 +92,10 @@ namespace Terrain3DTools.Pipeline
                     }
                     else
                     {
-                        // Height data staging failed, clear the texture instead
-                        System.Action onComplete = () => 
-                        { 
-                            if (GodotObject.IsInstanceValid(layer)) 
-                                layer.Visualizer.Update(); 
-                        };
+                        DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
+                            $"Failed to stage height data for layer '{layer.LayerName}' - creating clear task");
 
-                        var clearTask = CreateClearLayerTextureTask(layer, onComplete);
+                        var clearTask = CreateClearLayerTextureTask(layer);
                         
                         if (clearTask != null)
                         {
@@ -104,7 +108,7 @@ namespace Terrain3DTools.Pipeline
                     }
                 }
 
-                System.Action normalOnComplete = () => 
+                System.Action onComplete = () => 
                 { 
                     if (GodotObject.IsInstanceValid(layer)) 
                         layer.Visualizer.Update(); 
@@ -119,13 +123,16 @@ namespace Terrain3DTools.Pipeline
                     metadataBufferRid, 
                     activeRegionCount, 
                     dependencies, 
-                    normalOnComplete);
+                    onComplete);
 
                 if (maskTask != null)
                 {
                     context.TextureLayerMaskTasks[layer] = maskTask;
                     tasks[layer] = maskTask;
                     AsyncGpuTaskManager.Instance.AddTask(maskTask);
+
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
+                        $"Created mask task for layer '{layer.LayerName}'");
                 }
             }
 
@@ -133,33 +140,37 @@ namespace Terrain3DTools.Pipeline
         }
 
         /// <summary>
-        /// Creates a task to clear a layer's texture to black/transparent.
-        /// Used when a layer moves to an area with no valid regions.
+        /// Creates a task to clear a layer's texture to transparent.
+        /// Used when a layer moves to an area with no valid regions or when height data staging fails.
         /// </summary>
-        private AsyncGpuTask CreateClearLayerTextureTask(TerrainLayerBase layer, System.Action onComplete)
+        private AsyncGpuTask CreateClearLayerTextureTask(TerrainLayerBase layer)
         {
             if (!layer.layerTextureRID.IsValid)
                 return null;
 
-            var (clearCmd, clearRids, shaderPaths) = GpuKernels.CreateClearCommands(
+            System.Action onComplete = () => 
+            { 
+                if (GodotObject.IsInstanceValid(layer)) 
+                    layer.Visualizer.Update(); 
+            };
+
+            var clearTask = GpuKernels.CreateClearTask(
                 layer.layerTextureRID,
-                Colors.Transparent, // Clear to transparent
+                Colors.Transparent,
                 layer.Size.X,
-                layer.Size.Y);
-
-            if (clearCmd == null)
-                return null;
-
-            var owners = new List<object> { layer };
-
-            return new AsyncGpuTask(
-                clearCmd,
-                onComplete,
-                clearRids,
-                owners,
-                $"Clear texture layer '{layer.LayerName}'",
+                layer.Size.Y,
                 null,
-                shaderPaths);
+                onComplete,
+                layer,
+                $"Clear texture layer '{layer.LayerName}'");
+
+            if (clearTask != null)
+            {
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
+                    $"Created clear task for layer '{layer.LayerName}'");
+            }
+
+            return clearTask;
         }
     }
 }
