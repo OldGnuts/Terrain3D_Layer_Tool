@@ -1,24 +1,36 @@
+// /Core/Pipeline/FeatureLayerMaskPhase.cs
 using Godot;
 using System.Collections.Generic;
 using System.Linq;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Core;
 using Terrain3DTools.Utils;
+using Terrain3DTools.Core.Debug;
 
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 5: Generates mask textures for all dirty feature layers.
-    /// Feature layers may depend on both height and texture data.
-    /// Depends on: RegionHeightCompositePhase, RegionTextureCompositePhase (conditionally)
+    /// Feature layers represent complex terrain features like paths, roads, or plateaus
+    /// that can modify both height and texture data. Unlike simple height/texture layers,
+    /// features may generate their own height geometry and influence patterns.
+    /// Dependencies vary based on what the feature modifies (height, texture, or both).
     /// </summary>
     public class FeatureLayerMaskPhase : IProcessingPhase
     {
-        private bool DEBUG = false;
+        private const string DEBUG_CLASS_NAME = "FeatureLayerMaskPhase";
+
+        public FeatureLayerMaskPhase()
+        {
+            DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
+        }
 
         public Dictionary<object, AsyncGpuTask> Execute(TerrainProcessingContext context)
         {
             var tasks = new Dictionary<object, AsyncGpuTask>();
+
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                $"Processing {context.DirtyFeatureLayers.Count} feature layer(s)");
 
             foreach (var layer in context.DirtyFeatureLayers)
             {
@@ -32,7 +44,6 @@ namespace Terrain3DTools.Pipeline
                     .GetRegionBoundsForLayer(layer, context.RegionSize)
                     .GetRegionCoords();
 
-                // If the feature layer modifies height, it needs height composite data
                 if (featureLayer.ModifiesHeight)
                 {
                     var heightDependencies = overlappingRegionCoords
@@ -40,9 +51,11 @@ namespace Terrain3DTools.Pipeline
                         .Select(rc => context.RegionHeightCompositeTasks[rc])
                         .ToList();
                     dependencies.AddRange(heightDependencies);
+
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                        $"Feature '{featureLayer.LayerName}' depends on {heightDependencies.Count} height composite task(s)");
                 }
 
-                // If the feature layer modifies texture, it needs texture composite data
                 if (featureLayer.ModifiesTexture)
                 {
                     var textureDependencies = overlappingRegionCoords
@@ -50,6 +63,9 @@ namespace Terrain3DTools.Pipeline
                         .Select(rc => context.RegionTextureCompositeTasks[rc])
                         .ToList();
                     dependencies.AddRange(textureDependencies);
+
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                        $"Feature '{featureLayer.LayerName}' depends on {textureDependencies.Count} texture composite task(s)");
                 }
 
                 System.Action onComplete = () =>
@@ -74,8 +90,8 @@ namespace Terrain3DTools.Pipeline
                     tasks[layer] = maskTask;
                     AsyncGpuTaskManager.Instance.AddTask(maskTask);
 
-                    if (DEBUG) 
-                        GD.Print($"[FeatureLayerMaskPhase] Created mask task for {featureLayer.LayerName}");
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
+                        $"Created mask task for feature '{featureLayer.LayerName}'");
                 }
             }
 
