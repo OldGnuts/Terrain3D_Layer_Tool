@@ -1,4 +1,4 @@
-// /Masks/TerraceMask.cs 
+// /Masks/TerraceMask.cs (Corrected for Action<long>)
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -12,6 +12,7 @@ namespace Terrain3DTools.Masks
     [GlobalClass, Tool]
     public partial class TerraceMask : TerrainMask
     {
+        // ... (Properties and fields remain the same) ...
         #region Private Fields
         private TerraceMaskMode _mode = TerraceMaskMode.OutputTerracedHeight;
         private int _terraceCount = 10;
@@ -41,6 +42,7 @@ namespace Terrain3DTools.Masks
         public override MaskRequirements MaskDataRequirements() => UseBaseTerrainHeight ? MaskRequirements.RequiresHeightData : MaskRequirements.None;
         public override bool RequiresBaseHeightData() => UseBaseTerrainHeight;
 
+        // --- START OF CORRECTION FOR THE ENTIRE METHOD ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid())
         {
             if (UseBaseTerrainHeight)
@@ -85,6 +87,7 @@ namespace Terrain3DTools.Masks
 
         private (Action<long> commands, List<Rid> tempRids, List<string>) CreateTerraceShaderCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid heightSourceTexture)
         {
+            // REMOVED: 'using' block
             var shaderPath = "res://addons/terrain_3d_tools/Shaders/Masks/terrace_mask.glsl";
             var operation = new AsyncComputeOperation(shaderPath);
             
@@ -95,8 +98,10 @@ namespace Terrain3DTools.Masks
             uint groupsX = (uint)((maskWidth + 7) / 8);
             uint groupsY = (uint)((maskHeight + 7) / 8);
 
+            // This now correctly returns an Action<long>
             return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), new List<string> { shaderPath} );
         }
+        // --- END OF CORRECTION ---
 
         private byte[] BuildPushConstants()
         {

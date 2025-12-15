@@ -7,17 +7,36 @@ using Terrain3DTools.Core.Debug;
 namespace Terrain3DTools.Core
 {
     /// <summary>
-    /// Manages update timing, interaction states, and determines when terrain processing should occur.
-    /// Handles the distinction between interactive updates (during user interaction) and full updates
-    /// (after interaction ends).
+    /// Manages update timing and interaction states. Determines when terrain processing
+    /// should occur and distinguishes between interactive updates (during user interaction)
+    /// and full updates (after interaction ends).
     /// </summary>
     public class UpdateScheduler
     {
         private const string DEBUG_CLASS_NAME = "UpdateScheduler";
-        
-        #region Constants
-        private const double INTERACTION_THRESHOLD = 0.5;
-        private const double UPDATE_INTERVAL = 0.1;
+
+        #region Timing Configuration
+        private double _interactionThreshold = 0.5;
+        private double _updateInterval = 0.1;
+
+        /// <summary>
+        /// Time in seconds to wait after the last change before considering interaction complete.
+        /// Lower values = faster final updates, higher values = better batching of rapid changes.
+        /// </summary>
+        public double InteractionThreshold
+        {
+            get => _interactionThreshold;
+            set => _interactionThreshold = Mathf.Max(0.1, value);
+        }
+
+        /// <summary>
+        /// Time in seconds between update checks. Lower values = more responsive but higher CPU usage.
+        /// </summary>
+        public double UpdateInterval
+        {
+            get => _updateInterval;
+            set => _updateInterval = Mathf.Max(0.016, value); // Minimum ~60fps
+        }
         #endregion
 
         #region State
@@ -29,52 +48,36 @@ namespace Terrain3DTools.Core
         #endregion
 
         #region Properties
-        /// <summary>
-        /// True if currently in an interactive update cycle (user is actively making changes).
-        /// </summary>
         public bool IsInteracting => _isInteracting;
-
-        /// <summary>
-        /// True if a full (non-interactive) update has been queued.
-        /// </summary>
         public bool IsFullUpdateQueued => _fullUpdateQueued;
-
-        /// <summary>
-        /// Returns the set of layers that should be re-dirtied when the full update executes.
-        /// </summary>
         public IReadOnlyCollection<TerrainLayerBase> LayersToReDirty => _layersToReDirty;
         #endregion
 
         public UpdateScheduler()
         {
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization, 
-                $"UpdateScheduler initialized (interaction threshold: {INTERACTION_THRESHOLD}s, update interval: {UPDATE_INTERVAL}s)");
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
+                $"UpdateScheduler initialized (interaction threshold: {_interactionThreshold}s, update interval: {_updateInterval}s)");
         }
 
         #region Public API
-        /// <summary>
-        /// Updates timing state. Should be called every frame with delta time.
-        /// </summary>
-        /// <param name="delta">Time elapsed since last frame in seconds</param>
         public void Process(double delta)
         {
             if (_isInteracting)
             {
                 _interactionTimeout -= delta;
-                
+
                 if (_interactionTimeout <= 0)
                 {
-                    // Interaction period ended
                     _isInteracting = false;
                     _fullUpdateQueued = true;
-                    
-                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                         "Interaction period ended - full update queued");
-                    
+
                     if (_layersToReDirty.Count > 0)
                     {
-                        DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+                        DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                             $"{_layersToReDirty.Count} layer(s) will be re-dirtied on full update");
                     }
                 }
@@ -83,76 +86,57 @@ namespace Terrain3DTools.Core
             _updateTimer += delta;
         }
 
-        /// <summary>
-        /// Checks if an update should be processed this frame based on timing.
-        /// </summary>
-        /// <returns>True if an update should be processed</returns>
         public bool ShouldProcessUpdate()
         {
-            bool shouldUpdate = _updateTimer >= UPDATE_INTERVAL || _fullUpdateQueued;
-            
+            bool shouldUpdate = _updateTimer >= _updateInterval || _fullUpdateQueued;
+
             if (shouldUpdate)
             {
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                     $"Update triggered - Timer: {_updateTimer:F3}s, Full queued: {_fullUpdateQueued}");
             }
-            
+
             return shouldUpdate;
         }
 
-        /// <summary>
-        /// Signals that changes have been detected, starting or extending the interaction period.
-        /// </summary>
         public void SignalChanges()
         {
             bool wasInteracting = _isInteracting;
-            
+
             _isInteracting = true;
-            _interactionTimeout = INTERACTION_THRESHOLD;
-            
+            _interactionTimeout = _interactionThreshold;
+
             if (!wasInteracting)
             {
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                     "Interaction period started");
             }
             else
             {
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                     "Interaction period extended");
             }
         }
 
-        /// <summary>
-        /// Determines if the current update should be treated as interactive (not final).
-        /// </summary>
-        /// <returns>True if this is an interactive update</returns>
         public bool IsCurrentUpdateInteractive()
         {
             bool isInteractive = _isInteracting && !_fullUpdateQueued;
-            
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                 $"Update mode: {(isInteractive ? "INTERACTIVE" : "FULL")}");
-            
+
             return isInteractive;
         }
 
-        /// <summary>
-        /// Marks a layer to be re-dirtied when the full update executes.
-        /// Typically used for layers that were skipped during interactive resize.
-        /// </summary>
         public void MarkLayerForReDirty(TerrainLayerBase layer)
         {
             if (layer != null && _layersToReDirty.Add(layer))
             {
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying, 
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying,
                     $"Marked layer '{layer.LayerName}' for re-dirty on full update");
             }
         }
 
-        /// <summary>
-        /// Completes the current update cycle, resetting timers and processing queued states.
-        /// Should be called after ProcessUpdate completes.
-        /// </summary>
         public void CompleteUpdateCycle()
         {
             _updateTimer = 0;
@@ -160,20 +144,16 @@ namespace Terrain3DTools.Core
             if (_fullUpdateQueued)
             {
                 _fullUpdateQueued = false;
-                
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling, 
+
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Scheduling,
                     "Full update completed");
             }
         }
 
-        /// <summary>
-        /// Re-dirties all layers that were marked during interactive updates and clears the collection.
-        /// Should be called at the start of a full update.
-        /// </summary>
         public void ProcessReDirtyLayers()
         {
             if (_layersToReDirty.Count == 0) return;
-            
+
             DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying, "ProcessReDirtyLayers");
 
             int reDirtiedCount = 0;
@@ -183,27 +163,24 @@ namespace Terrain3DTools.Core
                 {
                     layer.ForceDirty();
                     reDirtiedCount++;
-                    
-                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails, 
+
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
                         $"Re-dirtied layer: {layer.LayerName}");
                 }
             }
-            
+
             _layersToReDirty.Clear();
 
             DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying, "ProcessReDirtyLayers");
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying, 
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying,
                 $"Re-dirtied {reDirtiedCount} layer(s)");
         }
 
-        /// <summary>
-        /// Resets all timing state. Useful for cleanup or re-initialization.
-        /// </summary>
         public void Reset()
         {
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Cleanup, 
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Cleanup,
                 $"Resetting scheduler - Was interacting: {_isInteracting}, Layers to re-dirty: {_layersToReDirty.Count}");
-            
+
             _isInteracting = false;
             _interactionTimeout = 0.0;
             _fullUpdateQueued = false;

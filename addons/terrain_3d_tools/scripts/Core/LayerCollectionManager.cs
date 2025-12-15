@@ -1,4 +1,3 @@
-// /Core/LayerCollectionManager.cs
 using Godot;
 using System.Linq;
 using Terrain3DTools.Layers;

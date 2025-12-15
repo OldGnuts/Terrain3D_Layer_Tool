@@ -63,7 +63,7 @@ namespace Terrain3DTools.Core.Debug
         public void RegisterClass(string className)
         {
             if (string.IsNullOrEmpty(className)) return;
-
+            if (_registeredClasses.Contains(className)) return;
             _registeredClasses.Add(className);
         }
 

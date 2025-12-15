@@ -1,4 +1,4 @@
-// /Masks/NoiseMask.cs 
+// /Masks/NoiseMask.cs (Corrected for Action<long>)
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -13,6 +13,7 @@ namespace Terrain3DTools.Masks
     [GlobalClass, Tool]
     public partial class NoiseMask : TerrainMask
     {
+        // ... (Properties and fields remain the same) ...
         #region Private Fields & Exported Properties
         private int _noiseType = 0;
         private int _seed = 1337;
@@ -48,6 +49,7 @@ namespace Terrain3DTools.Masks
         /// <summary>
         /// Creates the GPU commands to apply a procedural noise effect to the target mask.
         /// </summary>
+        // --- START OF CORRECTION ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid())
         {
             var shaderPath = "res://addons/terrain_3d_tools/Shaders/Masks/noise.glsl";
@@ -75,6 +77,7 @@ namespace Terrain3DTools.Masks
             uint groupsX = (uint)((maskWidth + 7) / 8);
             uint groupsY = (uint)((maskHeight + 7) / 8);
 
+            // This return is now valid.
             return (op.CreateDispatchCommands(groupsX, groupsY), op.GetTemporaryRids(), new List<string> { shaderPath });
         }
     }

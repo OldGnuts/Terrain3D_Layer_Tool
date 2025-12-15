@@ -3,7 +3,6 @@
 using Godot;
 using System.Collections.Generic;
 using System.Linq;
-//using Terrain3DWrapper;
 using TokisanGames;
 using Terrain3DTools.Core.Debug;
 
@@ -32,7 +31,7 @@ namespace Terrain3DTools.Core
             public Image HeightImage;
             public Image ControlImage;
             public int PendingCallbacks;
-            public Rid TemporaryHeightRid; // Store temporary RID for cleanup
+            public Rid TemporaryHeightRid;
         }
 
         private class PushBatch
@@ -80,7 +79,6 @@ namespace Terrain3DTools.Core
                 DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
                     $"Cancelling {_pendingPushes.Count} pending push(es)");
 
-                // Clean up temporary RIDs
                 foreach (var pending in _pendingPushes.Values)
                 {
                     if (pending.TemporaryHeightRid.IsValid)
@@ -97,6 +95,7 @@ namespace Terrain3DTools.Core
                 ExpectedRegions = new HashSet<Vector2I>(updatedRegions),
                 AllActiveRegions = allActiveRegions
             };
+
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
                 $"Starting push batch: {updatedRegions.Count} regions");
 
@@ -105,6 +104,26 @@ namespace Terrain3DTools.Core
             {
                 RequestRegionData(regionCoord);
             }
+
+            // Schedule a deferred UpdateMaps call to ensure visuals update even if 
+            // not all async callbacks fire in the same frame. This fixes an issue where
+            // one callback occasionally wouldn't fire, causing the visual update to be
+            // delayed until the next update cycle.
+            Callable.From(() =>
+            {
+                if (_terrain3D != null)
+                {
+                    try
+                    {
+                        _terrain3D.Data.UpdateMaps(Terrain3DRegion.MapType.Max, true);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                            $"Deferred UpdateMaps failed: {ex.Message}");
+                    }
+                }
+            }).CallDeferred();
         }
 
         private void RequestRegionData(Vector2I regionCoord)
@@ -120,7 +139,6 @@ namespace Terrain3DTools.Core
                 return;
             }
 
-            // Track this region
             var pending = new PendingRegionPush
             {
                 RegionCoord = regionCoord,
@@ -141,7 +159,6 @@ namespace Terrain3DTools.Core
                 return;
             }
 
-            // Store the temporary RID for cleanup
             pending.TemporaryHeightRid = scaledHeightRid;
 
             // Request height data from the scaled texture
@@ -154,7 +171,6 @@ namespace Terrain3DTools.Core
                 DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
                     $"Failed to request height data for {regionCoord}: {error}");
 
-                // Clean up temporary RID
                 Gpu.FreeRid(scaledHeightRid);
                 _pendingPushes.Remove(regionCoord);
                 _currentBatch?.CompletedRegions.Add(regionCoord);
@@ -171,14 +187,13 @@ namespace Terrain3DTools.Core
                 error = Gpu.Rd.TextureGetDataAsync(regionData.ControlMap, 0, controlCallback);
                 if (error != Error.Ok)
                 {
-                    pending.PendingCallbacks = 1; // Only waiting for height now
+                    pending.PendingCallbacks = 1;
                 }
             }
         }
 
         private Rid ApplyHeightScale(Rid sourceHeightMap)
         {
-            // Create temporary texture for scaled height
             Rid scaledHeightMap = Gpu.CreateTexture2D(
                 (uint)_regionSize,
                 (uint)_regionSize,
@@ -193,7 +208,6 @@ namespace Terrain3DTools.Core
                 return new Rid();
             }
 
-            // Create compute operation for height scaling
             var op = new AsyncComputeOperation("res://addons/terrain_3d_tools/Shaders/Utils/height_scale.glsl");
 
             if (!op.IsValid())
@@ -204,32 +218,26 @@ namespace Terrain3DTools.Core
                 return new Rid();
             }
 
-            // Bind resources
-            op.BindStorageImage(0, sourceHeightMap);  // Source
-            op.BindStorageImage(1, scaledHeightMap);  // Target
+            op.BindStorageImage(0, sourceHeightMap);
+            op.BindStorageImage(1, scaledHeightMap);
 
-            // Set height scale as push constant
             var pushConstants = GpuUtils.CreatePushConstants()
                 .Add(_heightScale)
                 .AddPadding(12)
                 .Build();
             op.SetPushConstants(pushConstants);
 
-            // Calculate dispatch groups (8x8 threads per group)
             uint groupsX = (uint)((_regionSize + 7) / 8);
             uint groupsY = (uint)((_regionSize + 7) / 8);
 
-            // Create dispatch commands
             var commands = op.CreateDispatchCommands(groupsX, groupsY);
 
-            // Execute synchronously
             long computeList = Gpu.ComputeListBegin();
             commands?.Invoke(computeList);
             Gpu.ComputeListEnd();
             Gpu.Submit();
-            Gpu.Sync(); // Wait for completion
+            Gpu.Sync();
 
-            // Clean up temporary resources from the operation
             foreach (var rid in op.GetTemporaryRids())
             {
                 Gpu.FreeRid(rid);
@@ -243,7 +251,6 @@ namespace Terrain3DTools.Core
 
         private void OnHeightDataReceived(Vector2I regionCoord, byte[] data, Rid temporaryHeightRid)
         {
-            // Free the temporary scaled height texture
             if (temporaryHeightRid.IsValid)
             {
                 Gpu.FreeRid(temporaryHeightRid);
@@ -254,9 +261,7 @@ namespace Terrain3DTools.Core
             if (!_pendingPushes.TryGetValue(regionCoord, out var pending))
                 return;
 
-            // Clear the stored temporary RID reference
             pending.TemporaryHeightRid = new Rid();
-
             pending.HeightImage = Image.CreateFromData(
                 _regionSize, _regionSize, false, Image.Format.Rf, data);
 
@@ -281,14 +286,11 @@ namespace Terrain3DTools.Core
             if (!_pendingPushes.TryGetValue(regionCoord, out var pending))
                 return;
 
-            // Wait for all callbacks
             if (pending.PendingCallbacks > 0)
                 return;
 
-            // Push to Terrain3D
             PushRegionToTerrain3D(pending);
 
-            // Mark as complete
             _pendingPushes.Remove(regionCoord);
             _currentBatch?.CompletedRegions.Add(regionCoord);
 
@@ -299,7 +301,6 @@ namespace Terrain3DTools.Core
         {
             var t3DData = _terrain3D.Data;
 
-            // Ensure region exists
             if (!t3DData.HasRegion(pending.RegionCoord))
             {
                 t3DData.AddRegionBlank(pending.RegionCoord, false);
@@ -313,7 +314,6 @@ namespace Terrain3DTools.Core
                 return;
             }
 
-            // Convert to terrain3d bindings
             if (pending.HeightImage != null)
                 t3DRegion.SetMap(Terrain3DRegion.MapType.Height, pending.HeightImage);
 
@@ -331,7 +331,6 @@ namespace Terrain3DTools.Core
             if (_currentBatch == null)
                 return;
 
-            // Check if all expected regions completed
             bool allComplete = _currentBatch.ExpectedRegions
                 .All(r => _currentBatch.CompletedRegions.Contains(r));
 
@@ -341,7 +340,6 @@ namespace Terrain3DTools.Core
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
                 $"Batch complete: {_currentBatch.CompletedRegions.Count}/{_currentBatch.ExpectedRegions.Count}");
 
-            // Finalize: remove regions and update terrain
             FinalizeTerrainUpdate(_currentBatch);
             _currentBatch = null;
         }
@@ -350,7 +348,6 @@ namespace Terrain3DTools.Core
         {
             var t3DData = _terrain3D.Data;
 
-            // Ensure all active regions exist
             int addedCount = 0;
             foreach (var regionCoord in batch.AllActiveRegions)
             {
@@ -367,9 +364,8 @@ namespace Terrain3DTools.Core
                             $"Failed to add region {regionCoord}: {ex.Message}");
                     }
                 }
-
             }
-            // Remove unused regions
+
             List<Vector2I> regionLocations = GetRegionLocations();
             int removedCount = 0;
             foreach (Vector2I regionLocation in regionLocations)
@@ -381,7 +377,6 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            // Final update
             try
             {
                 t3DData.UpdateMaps(Terrain3DRegion.MapType.Max, true);
@@ -403,7 +398,6 @@ namespace Terrain3DTools.Core
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
                     $"Cancelling {_pendingPushes.Count} pending push(es)");
 
-                // Clean up any temporary RIDs before clearing
                 foreach (var pending in _pendingPushes.Values)
                 {
                     if (pending.TemporaryHeightRid.IsValid)
@@ -434,17 +428,16 @@ namespace Terrain3DTools.Core
                    $"  Height scale: {_heightScale}\n" +
                    $"  Current batch: {(_currentBatch != null ? $"{_currentBatch.CompletedRegions.Count}/{_currentBatch.ExpectedRegions.Count}" : "None")}";
         }
+
         #region Helpers
         /// <summary>
         /// Gets all region locations that currently exist in Terrain3D data.
         /// </summary>
-        public System.Collections.Generic.List<Vector2I> GetRegionLocations()
+        public List<Vector2I> GetRegionLocations()
         {
-            var result = new System.Collections.Generic.List<Vector2I>();
+            var result = new List<Vector2I>();
 
-            // Terrain3D API: get_region_locations() returns Array of Vector2i
-            // Convert variant safe as list of V2I
-            var locations =  _terrain3D.Data.RegionLocations;
+            var locations = _terrain3D.Data.RegionLocations;
 
             if (locations is Godot.Collections.Array array)
             {
@@ -459,83 +452,8 @@ namespace Terrain3DTools.Core
 
             return result;
         }
-
-        
         #endregion
     }
 
-    /// <summary>
-        /// Helper extension methods for safe Variant handling
-        /// </summary>
-        public static class VariantExtensions
-        {
-            public static string SafeAsString(this Variant variant, string fallback = "")
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsString() : fallback;
-            }
-
-            public static bool SafeAsBool(this Variant variant, bool fallback = false)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsBool() : fallback;
-            }
-
-            public static float SafeAsSingle(this Variant variant, float fallback = 0f)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsSingle() : fallback;
-            }
-
-            public static int SafeAsInt32(this Variant variant, int fallback = 0)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsInt32() : fallback;
-            }
-
-            public static uint SafeAsUInt32(this Variant variant, uint fallback = 0)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsUInt32() : fallback;
-            }
-
-            public static Vector3 SafeAsVector3(this Variant variant, Vector3 fallback = default)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsVector3() : fallback;
-            }
-
-            public static Vector2 SafeAsVector2(this Variant variant, Vector2 fallback = default)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsVector2() : fallback;
-            }
-
-            public static Vector2I SafeAsVector2I(this Variant variant, Vector2I fallback = default)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsVector2I() : fallback;
-            }
-
-            public static Color SafeAsColor(this Variant variant, Color fallback = default)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsColor() : fallback;
-            }
-
-            public static Aabb SafeAsAabb(this Variant variant, Aabb fallback = default)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.As<Aabb>() : fallback;
-            }
-
-            public static GodotObject SafeAsGodotObject(this Variant variant)
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.AsGodotObject() : null;
-            }
-
-            public static T SafeAs<[MustBeVariant] T>(this Variant variant, T fallback = default) where T : class
-            {
-                return variant.VariantType != Variant.Type.Nil ? variant.As<T>() : fallback;
-            }
-
-            public static T SafeAsGodotObject<T>(this Variant variant, T fallback = null) where T : GodotObject
-            {
-                if (variant.VariantType == Variant.Type.Nil)
-                    return fallback;
-
-                var obj = variant.AsGodotObject();
-                return obj is T result ? result : fallback;
-            }
-        }
+    
 }

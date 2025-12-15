@@ -1,24 +1,32 @@
 // /Core/TerrainLayerManager.cs
 using Godot;
 using System.Collections.Generic;
-using Terrain3DWrapper;
 using Terrain3DTools.Core.Debug;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Utils;
 using System.Linq;
-using System.Runtime.Serialization.Formatters;
 
 namespace Terrain3DTools.Core
 {
+    /// <summary>
+    /// Central orchestrator for the terrain layer system. Manages the update pipeline
+    /// that processes layer changes, generates GPU work, and synchronizes results
+    /// with Terrain3D.
+    /// </summary>
     [GlobalClass, Tool]
     public partial class TerrainLayerManager : Node3D
     {
+        /// <summary>
+        /// State machine phases for the update pipeline.
+        /// Idle -> Processing -> ReadyToPush -> Idle
+        /// </summary>
         private enum UpdatePhase
         {
             Idle,
-            Processing, // GPU work in progress
-            ReadyToPush  // GPU work done, ready to sync
+            Processing,
+            ReadyToPush
         }
+
         #region Fields
         [Export(PropertyHint.None, "Read-only in the editor")]
         private int _terrainLayerCountForInspector;
@@ -28,7 +36,6 @@ namespace Terrain3DTools.Core
         private LayerCollectionManager _layerCollectionManager;
         private RegionDependencyManager _regionDependencyManager;
         private RegionMapManager _regionMapManager;
-        public RegionMapManager GetRegionMapManager() => _regionMapManager;
         private TerrainUpdateProcessor _updateProcessor;
         private UpdateScheduler _updateScheduler;
         private Terrain3DIntegration _terrain3DIntegration;
@@ -37,17 +44,11 @@ namespace Terrain3DTools.Core
         private List<Vector2I> _regionsToRemoveAfterPush = new();
         private float _worldHeight = 128;
         private bool _isInitialized = false;
-        private bool _SyncedWithTerrain3D = false;
         private AsyncGpuTaskManager _taskManagerInstance;
         private TerrainLayerBase _selectedLayer;
 
         [Export]
         public bool AutoPushToTerrain { get; set; } = false;
-
-        [Export]
-        public bool DebugTerrainPush { get; set; } = false;
-        [Export]
-        public bool DebugTerrain3DIntegration { get; set; } = false;
 
         [Export]
         public bool EnableRegionPreviews
@@ -56,10 +57,7 @@ namespace Terrain3DTools.Core
             set
             {
                 _enableRegionPreviews = value;
-                if (_regionMapManager != null)
-                {
-                    _regionMapManager.SetPreviewsEnabled(value);
-                }
+                _regionMapManager?.SetPreviewsEnabled(value);
             }
         }
         private bool _enableRegionPreviews = true;
@@ -67,24 +65,14 @@ namespace Terrain3DTools.Core
         #endregion
 
         #region Properties
-        /// <summary>
-        /// Gets the region size from the connected Terrain3D node.
-        /// </summary>
         public int Terrain3DRegionSize => _terrain3DConnector?.RegionSize ?? 0;
 
-        /// <summary>
-        /// Gets the number of terrain layers currently managed.
-        /// </summary>
         public int TerrainLayerCount => _layerCollectionManager?.Layers.Count ?? 0;
 
-        /// <summary>
-        /// Gets the mesh vertex spacing from the connected Terrain3D node.
-        /// </summary>
         public double TerrainVertexSpacing => _terrain3DConnector?.MeshVertexSpacing ?? 0f;
 
-        /// <summary>
-        /// Gets or sets the Terrain3D node to connect to.
-        /// </summary>
+        public RegionMapManager GetRegionMapManager() => _regionMapManager;
+
         [Export]
         public Node3D Terrain3DNode
         {
@@ -103,25 +91,63 @@ namespace Terrain3DTools.Core
             }
         }
 
-        /// <summary>
-        /// Gets or sets the world height scale for terrain processing.
-        /// </summary>
         [Export]
-        public float WorldHeightScale { get => _worldHeight; set => _worldHeight = value; }
+        public float WorldHeightScale
+        {
+            get => _worldHeight;
+            set
+            {
+                if (_worldHeight != value)
+                {
+                    _worldHeight = value;
+                    PropagateWorldHeightScaleToFeatureLayers();
+                }
+            }
+        }
 
         public void SetSelectedLayer(TerrainLayerBase layer)
         {
             _selectedLayer = layer;
-            _updateScheduler?.SignalChanges(); // Trigger update to refresh visualization
-            DebugManager.Instance?.Log( DEBUG_CLASS, DebugCategory.Initialization, "Selected layer " + _selectedLayer);
+            _updateScheduler?.SignalChanges();
+            DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Initialization, $"Selected layer: {_selectedLayer}");
         }
 
         public TerrainLayerBase GetSelectedLayer() => _selectedLayer;
 
         #endregion
 
-        #region Debug System Fields
-        const string DEBUG_CLASS = "TerrainLayerManager";
+        #region Update Timing Settings
+        [ExportGroup("⏱️ Update Timing")]
+
+        [Export(PropertyHint.Range, "0.016,1.0,0.016")]
+        public float UpdateInterval
+        {
+            get => (float)(_updateScheduler?.UpdateInterval ?? 0.1);
+            set
+            {
+                if (_updateScheduler != null)
+                    _updateScheduler.UpdateInterval = value;
+                _cachedUpdateInterval = value;
+            }
+        }
+        private float _cachedUpdateInterval = 0.1f;
+
+        [Export(PropertyHint.Range, "0.1,2.0,0.1")]
+        public float InteractionThreshold
+        {
+            get => (float)(_updateScheduler?.InteractionThreshold ?? 0.5);
+            set
+            {
+                if (_updateScheduler != null)
+                    _updateScheduler.InteractionThreshold = value;
+                _cachedInteractionThreshold = value;
+            }
+        }
+        private float _cachedInteractionThreshold = 0.5f;
+        #endregion
+
+        #region Debug System
+        private const string DEBUG_CLASS = "TerrainLayerManager";
         private DebugManager _debugManager;
 
         [ExportGroup("🐛 Debug Settings")]
@@ -170,9 +196,7 @@ namespace Terrain3DTools.Core
         #region Godot Lifecycle
         public override void _Ready()
         {
-
             InitializeDebugManager();
-
             InitializeManager();
 
             if (_terrain3DConnector.IsConnected)
@@ -183,53 +207,46 @@ namespace Terrain3DTools.Core
             TerrainHeightQuery.SetTerrainLayerManager(this);
         }
 
+        /// <summary>
+        /// Main update loop implementing a state machine for the terrain processing pipeline.
+        /// </summary>
         public override void _Process(double delta)
         {
             if (!_isInitialized || !Engine.IsEditorHint())
             {
-                DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.UpdateCycle,
-                            "_Process returned : Initialized " + _isInitialized + " | IsEditorHint : " + Engine.IsEditorHint());
                 return;
             }
 
             _debugManager?.Process(delta);
             _updateScheduler.Process(delta);
 
-            // State machine for update pipeline
             switch (_currentPhase)
             {
                 case UpdatePhase.Idle:
-                    // Check if we should start a new update
                     if (_updateScheduler.ShouldProcessUpdate())
                     {
-                        DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.UpdateCycle,
-                            "Update Phase - Idle, ProcessUpdate");
+                        DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
+                            "Starting ProcessUpdate");
                         ProcessUpdate();
                         _updateScheduler.CompleteUpdateCycle();
                     }
                     break;
 
                 case UpdatePhase.Processing:
-                    // Check if GPU work is complete
-                    DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.UpdateCycle,
-                            "Update Phase - Processing, HasPendingWork");
                     if (!AsyncGpuTaskManager.Instance.HasPendingWork)
                     {
                         _currentPhase = UpdatePhase.ReadyToPush;
-                        DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.UpdateCycle,
+                        DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                             "GPU work complete - ready to push");
                     }
                     break;
 
                 case UpdatePhase.ReadyToPush:
-                    // Push to Terrain3D and clean up
-                    DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush, "Pushing to Terrain3D.");
                     if (AutoPushToTerrain)
                     {
                         PushUpdatesToTerrain();
                     }
 
-                    // Clean up our region map
                     if (_regionsToRemoveAfterPush.Count > 0)
                     {
                         foreach (var region in _regionsToRemoveAfterPush)
@@ -242,7 +259,7 @@ namespace Terrain3DTools.Core
                     _regionsProcessedThisUpdate.Clear();
                     _currentPhase = UpdatePhase.Idle;
 
-                    DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.UpdateCycle,
+                    DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                         "Update cycle complete");
 
                     _debugManager?.FlushAggregatedMessages();
@@ -263,7 +280,6 @@ namespace Terrain3DTools.Core
         #region Initialization
         private void InitializeManager()
         {
-
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS);
             DebugManager.Instance?.StartTimer(DEBUG_CLASS, DebugCategory.Initialization, "InitializeManager");
 
@@ -286,7 +302,10 @@ namespace Terrain3DTools.Core
             _updateScheduler = new UpdateScheduler();
             _terrain3DConnector = new Terrain3DConnector(Owner);
 
-            //AutoAssignTerrain3D();
+            // Apply cached timing settings
+            _updateScheduler.UpdateInterval = _cachedUpdateInterval;
+            _updateScheduler.InteractionThreshold = _cachedInteractionThreshold;
+
             _isInitialized = true;
 
             DebugManager.Instance?.EndTimer(DEBUG_CLASS, DebugCategory.Initialization, "InitializeManager");
@@ -296,7 +315,6 @@ namespace Terrain3DTools.Core
 
         private void InitializeSubManagers()
         {
-            const string DEBUG_CLASS = "TerrainLayerManager";
             DebugManager.Instance?.StartTimer(DEBUG_CLASS, DebugCategory.Initialization, "InitializeSubManagers");
 
             if (Terrain3DRegionSize <= 0 || _scenePreviewManager == null)
@@ -311,7 +329,6 @@ namespace Terrain3DTools.Core
                 _scenePreviewManager.PreviewParent,
                 Owner);
 
-            // Region previews do not need to be enabled if we are updating the terrain system in real-time
             _regionMapManager.SetPreviewsEnabled(_enableRegionPreviews);
 
             _regionDependencyManager = new RegionDependencyManager(Terrain3DRegionSize, new Vector2I(-16, 15));
@@ -333,6 +350,9 @@ namespace Terrain3DTools.Core
                     "All sub-managers initialized successfully");
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Validation,
                     _terrain3DConnector.GetConnectionStatus());
+
+                // NEW: Propagate world height scale to any existing feature layers
+                PropagateWorldHeightScaleToFeatureLayers();
             }
             else
             {
@@ -347,13 +367,10 @@ namespace Terrain3DTools.Core
         {
             _debugManager = new DebugManager();
             DebugManager.Instance = _debugManager;
-
-            // Update from inspector array
             _debugManager.UpdateFromConfigArray(_activeDebugClasses);
-
-            _debugManager.Log("TerrainLayerManager", DebugCategory.Initialization,
-                "Debug Manager initialized");
+            _debugManager.Log(DEBUG_CLASS, DebugCategory.Initialization, "Debug Manager initialized");
         }
+
         private void AutoAssignTerrain3D()
         {
             if (_terrain3DConnector.IsConnected)
@@ -365,14 +382,10 @@ namespace Terrain3DTools.Core
             }
         }
 
-        /// <summary>
-        /// Called when the Terrain3D connection changes (connected or disconnected).
-        /// </summary>
         private void OnTerrain3DConnectionChanged()
         {
             if (_terrain3DConnector.IsConnected)
             {
-                // Connection established or changed
                 if (_isInitialized)
                 {
                     InitializeSubManagers();
@@ -380,7 +393,6 @@ namespace Terrain3DTools.Core
             }
             else
             {
-                // Connection lost or cleared
                 CleanupSubManagers();
             }
         }
@@ -395,11 +407,17 @@ namespace Terrain3DTools.Core
         #endregion
 
         #region Main Update Loop
+        /// <summary>
+        /// Processes a single update cycle through 6 phases:
+        /// 1. Detect changes (dirty layers, position changes)
+        /// 2. Propagate dependencies between layers
+        /// 3. Determine affected regions
+        /// 4. Prepare GPU resources
+        /// 5. Submit GPU work
+        /// 6. Update state and clear dirty flags
+        /// </summary>
         private void ProcessUpdate()
         {
-            const string DEBUG_CLASS = "TerrainLayerManager";
-
-            // Can't start new update while processing
             if (_currentPhase != UpdatePhase.Idle)
             {
                 DebugManager.Instance?.LogWarning(DEBUG_CLASS,
@@ -410,7 +428,8 @@ namespace Terrain3DTools.Core
             // === VALIDATION ===
             if (!_terrain3DConnector.ValidateConnection())
             {
-                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Validation, $"Terrain3D connection not validated");
+                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Validation,
+                    "Terrain3D connection not validated");
                 AutoAssignTerrain3D();
                 if (!_terrain3DConnector.IsConnected) return;
             }
@@ -429,26 +448,19 @@ namespace Terrain3DTools.Core
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                 $"Layers: Total={allLayers.Count}, MaskDirty={maskDirtyLayers.Count}, PositionDirty={positionDirtyLayers.Count}");
-            DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.LayerDirtying,
-                $"PHASE 1: MaskDirty={maskDirtyLayers.Count}, PositionDirty={positionDirtyLayers.Count}");
+
             foreach (var layer in positionDirtyLayers)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.LayerDetails,
                     $"Position dirty: '{layer.LayerName}' at {layer.GlobalPosition}");
             }
 
-            // Update region dependencies (fills boundaryDirtyRegions)
             var boundaryDirtyRegions = new HashSet<Vector2I>();
             _regionDependencyManager.Update(allLayers, boundaryDirtyRegions);
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionDependencies,
                 $"Boundary dirty regions: {boundaryDirtyRegions.Count}");
-            foreach (var region in boundaryDirtyRegions)
-            {
-                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionDetails,
-                    $"  Boundary region: {region}");
-            }
-            // Determine what to remove
+
             var regionsToRemove = _regionDependencyManager.GetRegionsToRemove(
                 _regionMapManager.GetManagedRegionCoords()
             );
@@ -480,7 +492,6 @@ namespace Terrain3DTools.Core
             // === PHASE 3: DETERMINE AFFECTED REGIONS ===
             var affectedRegions = new HashSet<Vector2I>(boundaryDirtyRegions);
 
-            // Add regions overlapped by any dirty or position-changed layers
             foreach (var layer in maskDirtyLayers.Union(positionDirtyLayers))
             {
                 var bounds = TerrainCoordinateHelper.GetRegionBoundsForLayer(layer, Terrain3DRegionSize);
@@ -490,11 +501,9 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            // Filter to processable regions
             var regionsToProcess = affectedRegions
                 .Where(coord =>
                 {
-                    // Always process boundary regions (need clearing)
                     if (boundaryDirtyRegions.Contains(coord))
                         return true;
 
@@ -506,11 +515,6 @@ namespace Terrain3DTools.Core
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionDependencies,
                 $"Affected: {affectedRegions.Count} → Processing: {regionsToProcess.Count}");
 
-            DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
-                $"Processing {regionsToProcess.Count} regions, " +
-                $"{maskDirtyLayers.Count} dirty layers, " +
-                $"{regionsToRemove.Count} to remove");
-
             // === PHASE 4: PREPARE RESOURCES ===
             bool isInteractiveResize = _updateScheduler.IsCurrentUpdateInteractive() &&
                                       maskDirtyLayers.Any(l => l.SizeHasChanged);
@@ -518,15 +522,16 @@ namespace Terrain3DTools.Core
             foreach (var layer in maskDirtyLayers)
             {
                 layer.PrepareMaskResources(isInteractiveResize);
+                if (layer is FeatureLayer featureLayer)
+                {
+                    featureLayer.SetWorldHeightScale(_worldHeight);
+                }
             }
 
             // === PHASE 5: SUBMIT GPU WORK ===
-            var dirtyHeightLayers = maskDirtyLayers
-                .Where(l => l.GetLayerType() == LayerType.Height);
-            var dirtyTextureLayers = maskDirtyLayers
-                .Where(l => l.GetLayerType() == LayerType.Texture);
-            var dirtyFeatureLayers = maskDirtyLayers
-                .Where(l => l.GetLayerType() == LayerType.Feature);
+            var dirtyHeightLayers = maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Height);
+            var dirtyTextureLayers = maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Texture);
+            var dirtyFeatureLayers = maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Feature);
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.PhaseExecution,
                 $"GPU work: Height={dirtyHeightLayers.Count()}, Texture={dirtyTextureLayers.Count()}, Feature={dirtyFeatureLayers.Count()}");
@@ -547,34 +552,25 @@ namespace Terrain3DTools.Core
             _regionsToRemoveAfterPush = regionsToRemove;
             _currentPhase = UpdatePhase.Processing;
 
-            // Clear dirty flags
             foreach (var layer in positionDirtyLayers) layer.ClearPositionDirty();
             foreach (var layer in maskDirtyLayers) layer.ClearDirty();
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
-                "Phase = Processing | GPU work Submitted");
+                "GPU work submitted");
         }
         #endregion
 
         #region Cleanup
         private void Cleanup()
         {
-            DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Cleanup, "Cleaning up.");
+            DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Cleanup, "Cleaning up");
+
             if (TerrainHeightQuery.GetTerrainLayerManager() == this)
             {
                 TerrainHeightQuery.SetTerrainLayerManager(null);
             }
 
-            // Cancel any pending async terrain pushes
-            if (_terrain3DIntegration != null && _terrain3DIntegration.HasPendingPushes)
-            {
-                if (DebugTerrainPush)
-                {
-                    DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Cleanup, "Cancelling pending pushes during cleanup");
-                }
-                _terrain3DIntegration.CancelPendingPushes();
-            }
-
+            _terrain3DIntegration?.CancelPendingPushes();
             _regionMapManager?.FreeAll();
             _scenePreviewManager?.Cleanup();
             _updateScheduler?.Reset();
@@ -584,66 +580,70 @@ namespace Terrain3DTools.Core
 
         #region Terrain Push API
         /// <summary>
-        /// Pushes all regions that were updated since the last push to the Terrain3D system.
-        /// This is called automatically if AutoPushToTerrain is enabled, or can be called manually.
+        /// Pushes updated regions to Terrain3D. Called automatically if AutoPushToTerrain
+        /// is enabled, or can be called manually for deferred updates.
         /// </summary>
         public void PushUpdatesToTerrain()
         {
             if (_terrain3DIntegration == null) return;
 
-            // Get regions that were updated (marked by region compositing phases)
             var updatedRegions = _regionDependencyManager.GetAndClearUpdatedRegions();
             var allRegions = _regionDependencyManager.GetActiveRegionCoords().ToList();
 
             if (updatedRegions.Count == 0)
             {
-                DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.TerrainPush,
-                    "Nothing to push");
+                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush, "Nothing to push");
                 return;
             }
 
-            DebugManager.Instance?.Log("TerrainLayerManager", DebugCategory.TerrainPush,
-                $"Pushing {updatedRegions.Count} updated region(s), ");
+            DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush,
+                $"Pushing {updatedRegions.Count} updated region(s)");
 
-            _terrain3DIntegration.PushRegionsToTerrain(
-                updatedRegions,
-                allRegions
-            );
+            _terrain3DIntegration.PushRegionsToTerrain(updatedRegions, allRegions);
         }
-
         #endregion
 
-        #region Debug Helper Methods (for Inspector/Editor)
-
+        #region Feature Layer Support
         /// <summary>
-        /// Creates a new ClassDebugConfig with default settings.
-        /// Call this from editor tools or inspector buttons.
+        /// Propagates the current world height scale to all feature layers.
+        /// Called when WorldHeightScale changes or when new feature layers are discovered.
         /// </summary>
-        public ClassDebugConfig CreateDebugConfigForClass(string className)
+        private void PropagateWorldHeightScaleToFeatureLayers()
         {
-            var config = new ClassDebugConfig(className)
+            if (_layerCollectionManager == null) return;
+
+            foreach (var layer in _layerCollectionManager.Layers)
             {
-                Enabled = true,
-                EnabledCategories = DebugCategory.None // User can enable categories as needed
-            };
+                if (layer is FeatureLayer featureLayer)
+                {
+                    featureLayer.SetWorldHeightScale(_worldHeight);
 
-            return config;
+                    DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Initialization,
+                        $"Set world height scale {_worldHeight} on feature layer '{featureLayer.LayerName}'");
+                }
+            }
         }
+        #endregion
 
+        #region Debug Configuration API
         /// <summary>
-        /// Adds a class to the active debug classes array if it doesn't already exist.
-        /// Returns true if added, false if already exists.
+        /// Programmatically adds a class to the debug configuration.
+        /// Useful for editor tools that need to enable debugging at runtime.
         /// </summary>
         public bool AddDebugClass(string className)
         {
-            // Check if already exists
             if (_activeDebugClasses.Any(c => c?.ClassName == className))
             {
                 GD.PrintErr($"[TerrainLayerManager] Class '{className}' is already in the debug list");
                 return false;
             }
 
-            var config = CreateDebugConfigForClass(className);
+            var config = new ClassDebugConfig(className)
+            {
+                Enabled = true,
+                EnabledCategories = DebugCategory.None
+            };
+
             _activeDebugClasses.Add(config);
             _debugManager?.UpdateFromConfigArray(_activeDebugClasses);
 
@@ -652,7 +652,7 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
-        /// Removes a class from the active debug classes array.
+        /// Programmatically removes a class from the debug configuration.
         /// </summary>
         public bool RemoveDebugClass(string className)
         {
@@ -668,8 +668,6 @@ namespace Terrain3DTools.Core
 
             return false;
         }
-
         #endregion
     }
-
 }

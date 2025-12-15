@@ -10,8 +10,32 @@ namespace Terrain3DTools.Layers
     [GlobalClass, Tool]
     public partial class TextureLayer : TerrainLayerBase
     {
-        [ExportGroup("Painting Properties")]
-        [Export(PropertyHint.Range, "0,31,1")] public int BaseTextureID { get; set; } = 0;
+        #region Private Fields
+        private int _textureIndex = 0;
+        private Godot.Collections.Array<int> _excludedTextureIds = new();
+        #endregion
+
+        #region Properties
+        [ExportGroup("Texture Properties")]
+        
+        [Export(PropertyHint.Range, "0,31")]
+        public int TextureIndex 
+        { 
+            get => _textureIndex; 
+            set => SetProperty(ref _textureIndex, Mathf.Clamp(value, 0, 31)); 
+        }
+
+        [Export]
+        public Godot.Collections.Array<int> ExcludedTextureIds
+        {
+            get => _excludedTextureIds;
+            set
+            {
+                _excludedTextureIds = value ?? new Godot.Collections.Array<int>();
+                ForceDirty();
+            }
+        }
+        #endregion
 
         public override LayerType GetLayerType() => LayerType.Texture;
         public override string LayerTypeName() => "Texture Layer";
@@ -45,29 +69,42 @@ namespace Terrain3DTools.Layers
             if (!layerTextureRID.IsValid || !regionData.ControlMap.IsValid)
             {
                 GD.PrintErr($"[TextureLayer] CreateApplyRegionCommands called on '{LayerName}' but a required texture is invalid.");
-                return (null, new List<Rid>(), new List<string> { "" });
+                return (null, new List<Rid>(), new List<string>());
             }
 
             Vector2 maskCenter = new Vector2(GlobalPosition.X, GlobalPosition.Z);
             OverlapResult? overlap = RegionMaskOverlap.GetRegionMaskOverlap(regionCoords, regionSize, maskCenter, Size);
             if (!overlap.HasValue)
             {
-                return (null, new List<Rid>(), new List<string> { "" });
+                return (null, new List<Rid>(), new List<string>());
             }
             var o = overlap.Value;
 
             var shaderPath = "res://addons/terrain_3d_tools/Shaders/Layers/TextureLayer.glsl";
             var operation = new AsyncComputeOperation(shaderPath);
+            var tempRids = new List<Rid>();
 
+            // Binding 0: Control map (read/write)
             operation.BindStorageImage(0, regionData.ControlMap);
+            
+            // Binding 1: Layer mask sampler
             operation.BindSamplerWithTexture(1, layerTextureRID);
 
+            // Binding 2: Exclusion list buffer
+            Rid exclusionBufferRid = CreateExclusionBuffer();
+            if (exclusionBufferRid.IsValid)
+            {
+                operation.BindStorageBuffer(2, exclusionBufferRid);
+                tempRids.Add(exclusionBufferRid);
+            }
+
+            // Push constants
             var pcb = GpuUtils.CreatePushConstants()
-                .Add(o.RegionMin.X).Add(o.RegionMin.Y)
-                .Add(o.MaskMin.X).Add(o.MaskMin.Y)
-                .Add(Size.X).Add(Size.Y)
-                .Add((uint)BaseTextureID)
-                .AddPadding(4)
+                .Add(o.RegionMin.X).Add(o.RegionMin.Y)      // region_min_px
+                .Add(o.MaskMin.X).Add(o.MaskMin.Y)          // mask_min_px
+                .Add(Size.X).Add(Size.Y)                     // layer_size_px
+                .Add((uint)TextureIndex)                     // texture_id
+                .Add((uint)_excludedTextureIds.Count)        // exclusion_count
                 .Build();
 
             operation.SetPushConstants(pcb);
@@ -75,7 +112,30 @@ namespace Terrain3DTools.Layers
             uint groupsX = (uint)((regionSize + 7) / 8);
             uint groupsY = (uint)((regionSize + 7) / 8);
 
-            return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), new List<string> { shaderPath });
+            tempRids.AddRange(operation.GetTemporaryRids());
+
+            return (operation.CreateDispatchCommands(groupsX, groupsY), tempRids, new List<string> { shaderPath });
+        }
+
+        /// <summary>
+        /// Creates a GPU buffer containing the excluded texture IDs.
+        /// </summary>
+        private Rid CreateExclusionBuffer()
+        {
+            // Always create buffer with at least 1 element (shader expects valid buffer)
+            int count = Math.Max(1, _excludedTextureIds.Count);
+            var data = new uint[count];
+            
+            for (int i = 0; i < _excludedTextureIds.Count; i++)
+            {
+                data[i] = (uint)Mathf.Clamp(_excludedTextureIds[i], 0, 31);
+            }
+
+            // Convert to bytes
+            byte[] bytes = new byte[count * sizeof(uint)];
+            Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+
+            return Gpu.Rd.StorageBufferCreate((uint)bytes.Length, bytes);
         }
     }
 }

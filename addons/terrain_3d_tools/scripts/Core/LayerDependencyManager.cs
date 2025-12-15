@@ -200,7 +200,7 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            // Handle height/texture layer movement affecting feature layers
+            // NEW: Handle height/texture layer movement affecting feature layers
             var allMovedBaseLayers = positionDirtyLayers.Where(l => 
                 l.GetLayerType() == LayerType.Height || l.GetLayerType() == LayerType.Texture).ToList();
 
@@ -231,5 +231,4 @@ namespace Terrain3DTools.Core
             }
         }
     }
-
 }

@@ -1,4 +1,4 @@
-// /Masks/SlopeMask.cs
+// /Masks/SlopeMask.cs (Corrected for Action<long>)
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -10,6 +10,7 @@ namespace Terrain3DTools.Masks
     [GlobalClass, Tool]
     public partial class SlopeMask : TerrainMask
     {
+        // ... (Properties and fields remain the same) ...
         #region Private Fields
         private float _minSlope = 20f;
         private float _maxSlope = 40f;
@@ -45,6 +46,7 @@ namespace Terrain3DTools.Masks
         public override MaskRequirements MaskDataRequirements() => UseBaseTerrainHeight ? MaskRequirements.RequiresHeightData : MaskRequirements.None;
         public override bool RequiresBaseHeightData() => UseBaseTerrainHeight;
         
+        // --- START OF CORRECTION FOR THE ENTIRE METHOD ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid())
         {
             if (UseBaseTerrainHeight)
@@ -102,6 +104,7 @@ namespace Terrain3DTools.Masks
             // This now correctly returns an Action<long>
             return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), new List<string> { shaderPath });
         }
+        // --- END OF CORRECTION ---
         
         private byte[] BuildPushConstants(float heightScale, float vertexSpacing)
         {

@@ -1,4 +1,3 @@
-// /Core/HeightDataStager.cs
 using System;
 using System.Linq;
 using Godot;
@@ -59,7 +58,7 @@ namespace Terrain3DTools.Core
             var result = new HeightStagingResult();
             var regionBounds = TerrainCoordinateHelper.GetRegionBoundsForLayer(layer, regionSize);
 
-            // Find overlapping regions and their data in a single pass 
+            // --- REFACTORED: Find overlapping regions and their data in a single pass ---
             var regionsToStage = new Dictionary<Vector2I, (RegionData data, OverlapResult overlap)>();
             for (int x = regionBounds.Position.X; x < regionBounds.End.X; x++)
                 for (int z = regionBounds.Position.Y; z < regionBounds.End.Y; z++)
@@ -76,6 +75,7 @@ namespace Terrain3DTools.Core
                         }
                     }
                 }
+            // --------------------------------------------------------------------------
 
             result.ActiveRegionCount = regionsToStage.Count;
             if (result.ActiveRegionCount == 0) return (null, result);

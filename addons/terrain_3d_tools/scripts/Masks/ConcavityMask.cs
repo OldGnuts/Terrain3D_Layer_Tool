@@ -1,4 +1,4 @@
-// /Masks/ConcavityMask.cs
+// /Masks/ConcavityMask.cs (Corrected for Action<long>)
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -12,6 +12,7 @@ namespace Terrain3DTools.Masks
     [GlobalClass, Tool]
     public partial class ConcavityMask : TerrainMask
     {
+        // ... (Properties and fields remain the same) ...
         #region Private Fields
         private ConcavityMode _mode = ConcavityMode.Concave;
         private int _radius = 3;
@@ -40,6 +41,7 @@ namespace Terrain3DTools.Masks
         public override MaskRequirements MaskDataRequirements() => UseBaseTerrainHeight ? MaskRequirements.RequiresHeightData : MaskRequirements.None;
         public override bool RequiresBaseHeightData() => UseBaseTerrainHeight;
 
+        // --- START OF CORRECTION FOR THE ENTIRE METHOD ---
         public override (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid())
         {
             if (UseBaseTerrainHeight)
@@ -64,7 +66,8 @@ namespace Terrain3DTools.Masks
 
                 // 3. Define the combined sequence. This lambda accepts the compute list from the task manager.
                 Action<long> combinedCommands = (computeList) => {
-                
+                    // REMOVED: Gpu.Rd.ComputeListBegin();
+
                     // Step A: Add the copy command to the provided compute list.
                     Gpu.AddCopyTextureCommand(computeList, targetMaskTexture, temporaryTexture, (uint)maskWidth, (uint)maskHeight);
 
@@ -73,6 +76,8 @@ namespace Terrain3DTools.Masks
 
                     // Step C: Invoke the shader action, passing the compute list down to it.
                     shaderAction?.Invoke(computeList);
+                    
+                    // REMOVED: Gpu.Rd.ComputeListEnd();
                 };
 
                 // 4. The task must own ALL temporary RIDs from this entire operation.
@@ -106,8 +111,9 @@ namespace Terrain3DTools.Masks
             uint groupsX = (uint)((maskWidth + 7) / 8);
             uint groupsY = (uint)((maskHeight + 7) / 8);
 
+            // This now correctly returns an Action<long>
             return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), new List<string> { shaderPath });
         }
+        // --- END OF CORRECTION ---
     }
 }
-

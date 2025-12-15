@@ -157,8 +157,8 @@ namespace Terrain3DTools.Core
         }
 
         public HashSet<Vector2I> DetermineDirtyRegions(
-            HashSet<Vector2I> boundaryDirtyRegions,
-            IEnumerable<TerrainLayerBase> layersWithChanges)
+    HashSet<Vector2I> boundaryDirtyRegions,
+    IEnumerable<TerrainLayerBase> layersWithChanges)
         {
             DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.RegionDependencies, "DetermineDirtyRegions");
 

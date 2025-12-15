@@ -8,7 +8,7 @@ namespace Terrain3DTools.Layers
     {
         [Export] public Vector2I RegionCoords { get; set; }
 
-        // This RID is the single source of truth for the texture data.
+        // This RID is now the single source of truth for the texture data.
         // We will assign it a new value when the data is regenerated.
         public Rid LocalRegionRid { get; set; }
 
@@ -34,6 +34,7 @@ namespace Terrain3DTools.Layers
             base._ExitTree();
             if (Engine.IsEditorHint())
             {
+                //GD.Print($"[DEBUG] EXIT_TREE for RegionPreview {RegionCoords}. Its HeightMap Rid was {LocalRegionRid.Id}. The associated Texture2Drd will now be freed by Godot.");
                 if (IsInstanceValid(_rdPreviewTexture))
                     _rdPreviewTexture.TextureRdRid = new Rid();
             }
@@ -44,6 +45,8 @@ namespace Terrain3DTools.Layers
             _planeMesh = new PlaneMesh
             {
                 Size = new Vector2(RegionSize, RegionSize),
+                // Subdivision is only really necessary if you are displacing vertices.
+                // If it's just a color preview, you can reduce this for performance.
                 SubdivideDepth = RegionSize,
                 SubdivideWidth = RegionSize
             };

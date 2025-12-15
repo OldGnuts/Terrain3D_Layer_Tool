@@ -17,9 +17,9 @@ void vertex() {
     float total_h = 0.0;
     
     // 1. Get Base Terrain Height
-    if (use_terrain_height) {
+    //if (use_terrain_height) {
         total_h += texture(terrain_height_tex, UV).r;
-    }
+    //}
     
     // 2. Add the Layer's own contribution
     // This allows us to see the displacement of the layer we are currently editing
@@ -29,7 +29,7 @@ void vertex() {
     // If your mask logic produces negative values for subtraction, this works automatically.
     // If your mask is 0..1 and you subtract, visualizer might look additive unless we handle mode.
     // But for a generic preview, seeing the magnitude of change is usually sufficient.
-    total_h += mask_val * layer_strength;
+    //total_h += mask_val * layer_strength;
 
     VERTEX.y += total_h * height_multiplier; 
     

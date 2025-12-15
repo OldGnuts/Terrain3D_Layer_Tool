@@ -1,4 +1,4 @@
-// /Masks/TerrainMask.cs 
+// /Masks/TerrainMask.cs (Corrected for Action<long>)
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -63,12 +63,14 @@ namespace Terrain3DTools.Masks
 
         #region Abstract Mask Application
         
+        // --- START OF CORRECTION ---
         /// <summary>
         /// Creates the GPU commands to apply this mask's effect to a target texture.
         /// This method now returns an Action that accepts a compute list handle.
         /// </summary>
         /// <returns>A tuple containing the GPU command Action<long> and a list of any temporary RIDs created and the shaderPath.</returns>
         public abstract (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyCommands(Rid targetMaskTexture, int maskWidth, int maskHeight, Rid stitchedHeightmap = new Rid());
+        // --- END OF CORRECTION ---
         
         /// <summary>
         /// Each mask must declare the type of data it requires to function.
@@ -81,5 +83,4 @@ namespace Terrain3DTools.Masks
         /// </summary>
         public virtual bool RequiresBaseHeightData() => false;
     }
-
 }

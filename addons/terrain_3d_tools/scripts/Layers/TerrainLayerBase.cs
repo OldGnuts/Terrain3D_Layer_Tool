@@ -29,6 +29,7 @@ namespace Terrain3DTools.Layers
         private bool _positionDirty = false;
         private Vector2I _oldSize;
         private LayerVisualizer _visualizer;
+        private ulong _lastDirtyFrame = 0;
         #endregion
 
         #region Properties
@@ -108,7 +109,7 @@ namespace Terrain3DTools.Layers
         #region Abstract Methods
 
         /// <summary>
-        /// This method returns a description of GPU commands that accept a compute list.
+        /// This method now returns a description of GPU commands that accept a compute list.
         /// </summary>
         /// <returns>A tuple containing the GPU command Action<long> and a list of any temporary RIDs created.</returns>
         public abstract (Action<long> commands, List<Rid> tempRids, List<string>) CreateApplyRegionCommands(
@@ -122,7 +123,6 @@ namespace Terrain3DTools.Layers
         public abstract string LayerTypeName();
         #endregion
 
-        // ... (The rest of the file remains exactly the same) ...
         #region Helpers
         protected void SetProperty<T>(ref T field, T value)
         {
@@ -135,7 +135,18 @@ namespace Terrain3DTools.Layers
 
         public void ClearDirty() { _isDirty = false; }
         public void ClearPositionDirty() { _positionDirty = false; }
-        public void ForceDirty() { _isDirty = true; }
+        public void ForceDirty()
+        {
+            ulong currentFrame = Engine.GetProcessFrames();
+            if (_lastDirtyFrame == currentFrame && _isDirty)
+            {
+                return; // Already marked dirty this frame
+            }
+
+            _lastDirtyFrame = currentFrame;
+            _isDirty = true;
+        }
+
         public void ForcePositionDirty() { _positionDirty = true; }
         public virtual void MarkPositionDirty() { _positionDirty = true; }
 

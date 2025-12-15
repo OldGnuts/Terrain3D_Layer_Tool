@@ -1,3 +1,4 @@
+// /Core/Debug/DebugCategory.cs
 using System;
 
 namespace Terrain3DTools.Core.Debug
@@ -38,40 +39,27 @@ namespace Terrain3DTools.Core.Debug
         // Pipeline Phases (High Frequency)
         PhaseExecution = 1 << 14, // Phase start/end, counts
         MaskGeneration = 1 << 15, // Mask pipeline operations (aggregated)
+        RegionCompositing = 1 << 16, // Region composite operations (height/texture/feature application)
 
         // GPU Operations (Very High Frequency)
-        GpuDispatches = 1 << 16, // Compute dispatches (aggregated)
-        GpuSync = 1 << 17, // Sync points, barriers
-        GpuResources = 1 << 18, // RID allocation/cleanup
-        ShaderOperations = 1 << 19, // Shader binding, validation
+        GpuDispatches = 1 << 17, // Compute dispatches (aggregated)
+        GpuSync = 1 << 18, // Sync points, barriers
+        GpuResources = 1 << 19, // RID allocation/cleanup
+        ShaderOperations = 1 << 20, // Shader binding, validation
 
         // Terrain Integration (High Frequency)
-        TerrainPush = 1 << 20, // Async push operations
-        TerrainSync = 1 << 21, // Region sync with Terrain3D
-        TerrainCallbacks = 1 << 22, // GPU texture callbacks
+        TerrainPush = 1 << 21, // Async push operations
+        TerrainSync = 1 << 22, // Region sync with Terrain3D
+        TerrainCallbacks = 1 << 23, // GPU texture callbacks
 
         // Performance & Metrics (Variable)
-        PerformanceMetrics = 1 << 23, // Counts, timings, batch sizes
-        ResourceTracking = 1 << 24, // Memory allocation tracking
-        PerformanceTiming = 1 << 25, // Task start/end with timing data
+        PerformanceMetrics = 1 << 24, // Counts, timings, batch sizes
+        ResourceTracking = 1 << 25, // Memory allocation tracking
+        PerformanceTiming = 1 << 26, // Task start/end with timing data
 
-        // NEW: Mask-Specific Categories
-        MaskSetup = 1 << 26, // Mask initialization, resource prep
-        MaskPasses = 1 << 27, // Individual mask pass execution (e.g., erosion iterations)
-        MaskBlending = 1 << 28, // Final blending operations
-
-/*
-        // Composite Flags (for convenience)
-        AllSystem = Initialization | Cleanup | Validation,
-        AllLayers = LayerLifecycle | LayerDirtying | LayerDetails,
-        AllRegions = RegionLifecycle | RegionDependencies | RegionDetails,
-        AllTasks = TaskCreation | TaskExecution | TaskDependencies,
-        AllGpu = GpuDispatches | GpuSync | GpuResources | ShaderOperations,
-        AllTerrain = TerrainPush | TerrainSync | TerrainCallbacks,
-        AllPerformance = PerformanceMetrics | PerformanceTiming,
-        AllMasks = MaskSetup | MaskPasses | MaskBlending,
-
-        All = ~0u
-*/
+        // Mask-Specific Categories
+        MaskSetup = 1 << 27, // Mask initialization, resource prep
+        MaskPasses = 1 << 28, // Individual mask pass execution (e.g., erosion iterations)
+        MaskBlending = 1 << 29, // Final blending operations
     }
 }

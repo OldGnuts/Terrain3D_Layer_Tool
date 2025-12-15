@@ -27,10 +27,8 @@ namespace Terrain3DTools.Visuals
             _ownerLayer = owner;
             Name = "Visualizer";
 
-            // Select shader based on layer type (mostly for different color schemes)
-            Shader shader = _ownerLayer.GetLayerType() == LayerType.Texture
-                ? GD.Load<Shader>("res://addons/terrain_3d_tools/Shaders/DebugPreviewShaderTexture.gdshader")
-                : GD.Load<Shader>("res://addons/terrain_3d_tools/Shaders/DebugPreviewShader.gdshader");
+            // Select shader based on layer type
+            Shader shader = GetShaderForLayerType(_ownerLayer.GetLayerType());
 
             _shaderMat = new ShaderMaterial { Shader = shader };
 
@@ -50,6 +48,17 @@ namespace Terrain3DTools.Visuals
             _rdLayerMask = new Texture2Drd();
 
             AddChild(_visualMesh);
+        }
+
+        private Shader GetShaderForLayerType(LayerType layerType)
+        {
+            return layerType switch
+            {
+                LayerType.Height => GD.Load<Shader>("res://addons/terrain_3d_tools/Shaders/DebugPreviewShader.gdshader"),
+                LayerType.Texture => GD.Load<Shader>("res://addons/terrain_3d_tools/Shaders/DebugPreviewShaderTexture.gdshader"),
+                LayerType.Feature => GD.Load<Shader>("res://addons/terrain_3d_tools/Shaders/DebugPreviewShaderFeature.gdshader"),
+                _ => GD.Load<Shader>("res://addons/terrain_3d_tools/Shaders/DebugPreviewShader.gdshader")
+            };
         }
 
         public override void _EnterTree()
@@ -103,7 +112,6 @@ namespace Terrain3DTools.Visuals
             // 1. UPDATE GEOMETRY TEXTURE (Terrain Height)
             if (_ownerLayer.layerHeightVisualizationTextureRID.IsValid)
             {
-                GD.Print("Using height data");
                 UpdateSharedTexture(ref _rdTerrainHeight, _ownerLayer.layerHeightVisualizationTextureRID);
                 _shaderMat.SetShaderParameter("terrain_height_tex", _rdTerrainHeight);
                 _shaderMat.SetShaderParameter("use_terrain_height", true);
@@ -121,25 +129,37 @@ namespace Terrain3DTools.Visuals
                 _shaderMat.SetShaderParameter("layer_data_tex", _rdLayerMask);
             }
 
+            // 3. SET LAYER-TYPE-SPECIFIC PARAMETERS
+            SetLayerTypeParameters();
+        }
+
+        private void SetLayerTypeParameters()
+        {
             float visualStrength = 1.0f;
 
             if (_ownerLayer is HeightLayer heightLayer)
             {
                 visualStrength = heightLayer.Strength;
-                // Optional: Handle subtract mode if you want red-displacement
                 if (heightLayer.Operation == HeightLayer.HeightOperation.Subtract)
                 {
                     visualStrength *= -1.0f;
                 }
+                _shaderMat.SetShaderParameter("layer_strength", visualStrength);
             }
-            else if (_ownerLayer is FeatureLayer)
+            else if (_ownerLayer is FeatureLayer featureLayer)
             {
-                // Feature layers might handle height differently, usually baked into the mask
-                // or specific properties, default to 1.0 for now.
-                visualStrength = 1.0f;
+                // Feature layer specific parameters
+                _shaderMat.SetShaderParameter("layer_strength", 1.0f);
+                
+                // These can be exposed as properties on FeatureLayer if desired
+                _shaderMat.SetShaderParameter("preview_opacity", 0.35f);
+                _shaderMat.SetShaderParameter("show_contours", true);
+                _shaderMat.SetShaderParameter("contour_spacing", 0.1f);
             }
-
-            _shaderMat.SetShaderParameter("layer_strength", visualStrength);
+            else
+            {
+                _shaderMat.SetShaderParameter("layer_strength", visualStrength);
+            }
         }
 
         private void UpdateSharedTexture(ref Texture2Drd target, Rid sourceRid)

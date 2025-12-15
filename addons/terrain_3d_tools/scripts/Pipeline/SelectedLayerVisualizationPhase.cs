@@ -13,7 +13,7 @@ namespace Terrain3DTools.Pipeline
     /// Phase 7: Updates visualization for the currently selected layer.
     /// This runs after all processing (including features) is complete,
     /// ensuring the visualization shows the accurate, fully-composited terrain shape.
-    /// Only processes height layers as they require terrain geometry visualization.
+    /// Processes both height layers and feature layers that need terrain geometry visualization.
     /// </summary>
     public class SelectedLayerVisualizationPhase : IProcessingPhase
     {
@@ -37,10 +37,13 @@ namespace Terrain3DTools.Pipeline
                 return tasks;
             }
 
-            if (selectedLayer.GetLayerType() != LayerType.Height)
+            var layerType = selectedLayer.GetLayerType();
+            
+            // If masks already provided height data, skip - LayerMaskPipeline handled it
+            if (selectedLayer.DoesAnyMaskRequireHeightData())
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                    $"Selected layer '{selectedLayer.LayerName}' is not a height layer - skipping");
+                    $"Layer '{selectedLayer.LayerName}' already has height data from masks - skipping");
                 return tasks;
             }
 
@@ -64,6 +67,7 @@ namespace Terrain3DTools.Pipeline
 
             var dependencies = new List<AsyncGpuTask>();
 
+            // Gather dependencies from height composite tasks
             foreach (var coord in overlappingRegions)
             {
                 if (context.RegionHeightCompositeTasks.TryGetValue(coord, out var heightTask))
@@ -72,6 +76,7 @@ namespace Terrain3DTools.Pipeline
                 }
             }
 
+            // Gather dependencies from feature composite tasks
             if (context.RegionFeatureCompositeTasks != null)
             {
                 foreach (var coord in overlappingRegions)
@@ -84,7 +89,7 @@ namespace Terrain3DTools.Pipeline
             }
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                $"Layer '{selectedLayer.LayerName}' - Creating visualization from {overlappingRegions.Count} regions with {dependencies.Count} dependencies");
+                $"Layer '{selectedLayer.LayerName}' ({layerType}) - Creating visualization from {overlappingRegions.Count} regions with {dependencies.Count} dependencies");
 
             var task = GpuKernels.CreateVisualizationTask(
                 selectedLayer,
