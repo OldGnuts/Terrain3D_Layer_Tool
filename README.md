@@ -45,12 +45,13 @@ This is the factory that generates the specific GPU work for a single layer. If 
 ### 4. The Macro-Pipeline (`TerrainUpdateProcessor`)
 Once individual layer masks are generated, the Processor blends them into the final Region Data via a 6-phase pass:
 
-1.  **Height Mask Phase:** Generates influence masks for dirty height layers.
+1.  **Height Layer Phase:** Generates influence masks for dirty height layers.
 2.  **Height Composite Phase:** Blends valid height masks into the **Region Heightmap (R32F)** using the layer's operation (Add/Subtract/Multiply).
-3.  **Texture Mask Phase:** Generates masks for texture layers. Crucially, this phase can read the *result* of Phase 2 to apply topological rules (Slope/Concavity).
+3.  **Texture Layer Phase:** Generates masks for texture layers. Crucially, this phase can read the *result* of Phase 2 to apply topological rules (Slope/Concavity).
 4.  **Texture Composite Phase:** Blends Texture IDs into the **Region Control Map (R32UI)** using bitwise operations.
-5.  **Feature Mask Phase:** Calculates geometry for complex features (Paths).
-6.  **Feature Application Phase:** Applies final modifications to both height and control maps.
+5.  **Feature Layer Phase:** Calculates geometry for complex features (IE: Paths, object placement with terrain data modifications).
+6.  ** - The purpose of the feature layers is to provide the edge case layer, some layers may place a building and need to modify height and texturing, or paths which have the same requirements. Future considerations are placing leaves on the ground, particle effects, and other object placement tasks which require reading and writing both height and texture data.
+7.  **Feature Application Phase:** Applies final modifications to both height and control maps.
 
 ### 5. Synchronization & Output
 1.  **GPU Sync:** The `AsyncGpuTaskManager` calls `RenderingDevice.Sync()`, blocking briefly to ensure all compute operations are finished.
@@ -86,23 +87,36 @@ The system bypasses high-level nodes for direct `RenderingDevice` control.
 
 ## 🏔️ The Layer System
 
-Layers are `Node3D` objects that can be placed anywhere in the scene.
+Layers are `Node3D` objects that can be placed anywhere in the scene. They all share common base properties with are provided by 'TerrainLayerBase' and 'FeatureLayer' extends 'TerrainLayerBase' to provide additional common properties. All layers have access to a general masking stack provided from the base class. This allows the user to use any of the masks in a stack, in addition to specific layer functionality.
+*   Layers have access to the mask operations, Add, Subtract, Multiply, Replace, Mix. Using a strength property for granular control.
+*   Layers have access to falloff, linear, circular and none. Use a falloff strength property for gransular control. Defaults to circular and full strength.
+*   Layers have a size property to extends its area of influence.
+*   Layers own persistent gpu resources and visualizations.
+
+### `Mask Array`
+All layer have access to base masks that can be stacked, and re-ordered. Masks are applied first to last and after the any layer specific (feature layer) masks are applied. 
+See the 'Mask System' for more details.
 
 ### `HeightLayer`
 Modifies the physical geometry.
-*   **Operations:** Add, Subtract, Multiply, Overwrite.
+*   **Logic:** Mask stack based height generation.
 *   **Output:** Modifies the R32F Heightmap.
 
 ### `TextureLayer`
 Modifies surface materials.
 *   **Logic:** Uses masks to determine where to apply specific Base and Overlay Texture IDs.
-*   **Output:** Modifies the specific bits of the R32UI Control Map.
+*   **Output:** Modifies the specific bits of the R32UI Control Map, stored in R32F format.
 
-### `PathLayer` (Feature Layer)
-A specialized layer wrapping a `Path3D`.
+### `Feature Layer` (Path Layer)
+Future feature layers are in the works, and they will give access to object / mesh / detail placement. Path Layer is available currently.
+A path layer is specialized layer utilizing a `Curve3D`.
 *   **Geometry:** Can raise roads (embankments) or carve rivers (trenches) using Curve3D data.
-*   **Texturing:** Applies distinct Texture IDs to the path center, embankment, and transition zone.
+*   **Texturing:** Applies distinct Texture IDs to the zones. IE: path center, embankment, and transition zone.
 *   **Rasterization:** Converts 3D curves into GPU-friendly segment buffers for efficient carving.
+*   **Zone Based:** Diffent zones may be required by different path desires. The user can add many zones which extent outward from the center of the path. IE: A road can have drainage, embankments, shoulders ect. These zones are configurable in the editor in a full featured profile editor.
+*   **Individual Zone Settings:** Height modification noise and texture modification noise are separate for every zone, so the user has full control on how the path modifies the terrain height and the terrain texturing separately for each zone. Each texture is seperated per zone. Any zone has individual properties the user can adjust allowing the user to have complete control of how the path looks.
+*   **Path Profiles:** Base profiles can be selected by default. This allows quick iteration on path layer designs.
+*   **Framework for Object Placement (WIP):** Placing meshes along the paths spline, or scattered in a zone is planned and the framework for that is in place, but not yet fully incorporated.
 
 ---
 
@@ -110,21 +124,24 @@ A specialized layer wrapping a `Path3D`.
 
 Masks define the *shape* and *intensity* of a layer.
 
-*   **Procedural:** `NoiseMask` (Perlin/Simplex/Cellular), `HeightRangeMask`.
-*   **Image:** `StampMask`. Features an **Async Upload** system to stream CPU images to the GPU without editor stalls.
-*   **Topological:** `SlopeMask`, `ConcavityMask`, `TerraceMask`. These analyze the **Stitched Context** height data to apply logic (e.g., "Texture cliffs where slope > 45°").
-*   **Simulation:** `ErosionMask`. A multi-pass GPU simulation handling Global Flow, Hydraulic Erosion (sediment transport), and Thermal Weathering (talus generation).
+*   Concavity - Generates concave or convex mask data.
+*   Erosion - 4 stage erosion system, global flow, global flow blur passes, hydraulic erosion, thermal erosion, smoothing post pass Each pass is fully configurable. Bluring stages are gaussian. The user can decide to use all of the stages, or select which stages they want, and configure those stages.
+*   HeightRangeMask - Generates a mask based on min/max height and min/max falloff from those values.
+*   NoiseMask - Generates mask data based on configurable noise generatation. Noise computations : Value, Perlin, Simplex, Ridge. 
+*   SlopeMask - Generates mask data for identifying slopes based on min/max slope and min/max falloff from those values.
+*   StampMask - Allows the user to use an existing mask / stamp from the drive.
+*   TerraceMask - Terraces whatever mask data is present in the mask when the mask operation runs. Its also configurable to use height data, which will terrace the height data from the overlapping regions and then apply the mask it generates to the existing mask. This can be used in any layer. 
 
 ---
 
 ## 🛠️ Editor Tools & Debugging
 
-*   **Path Snapping:** `TerrainPath3D` and `PathTerrainSnapPlugin` allow curves to auto-snap to the non-destructive terrain height using `TerrainHeightQuery`.
 *   **Inspector Previews:** `TerrainLayerInspector` leverages the `LayerMaskPipeline` to run one-shot async GPU tasks, rendering live mask previews inside the Inspector panel.
 *   **Debug Manager:** A centralized system for:
     *   **Aggregation:** Groups high-frequency logs to prevent console spam.
     *   **Categorization:** Filters logs by subsystem (e.g., `GpuResources`, `MaskGeneration`, `TerrainPush`).
     *   **Performance:** Tracks execution timing for pipeline phases.
+    *   **Customizable Degug Flow:** Classes can be selected for debugging, and different debug categories per class can be selected to allow fast debugging without a flood of all debugging statements.
 
 ***
 
@@ -167,10 +184,13 @@ Once the system knows *what* to update, it builds a Directed Acyclic Graph (DAG)
 
 *   **Wait/Signal Architecture:** Every `AsyncGpuTask` has a list of dependencies. The Task Manager holds a task in a "Pending" state until all its dependencies report `Completed`.
 *   **The Processing Chain:**
-    1.  **Height Composite Task:** Runs first.
-    2.  **Texture Mask Task:** Waits for the Height Composite to finish. Why? Because the `SlopeMask` shader needs to sample the *result* of the Height Composite to calculate steepness.
-    3.  **Texture Composite Task:** Waits for the Texture Mask to finish.
-    4.  **Feature Mask Task:** Waits for both Height and Texture composites.
+*   
+    1.  **Height Mask Task:** Runs first.
+    2.  **Height Composite Task:** Waits for the Height Mask tasks to finish.
+    3.  **Texture Mask Task:** Waits for the Height Composites to finish. Why? Because the `SlopeMask` shader needs to sample the *result* of the Height Composite to calculate steepness.
+    4.  **Texture Composite Task:** Waits for the Texture Mask tasks to finish.
+    5.  **Feature Mask Task:** Waits for both Height and Texture composites to finish.
+    6.  **Feature Mask Application:** Waits for Feature layers to finish.
 
 ## 📉 Example Scenario: Moving a Mountain
 
@@ -184,5 +204,5 @@ To illustrate, here is what happens when you drag a **Height Layer** node that s
     *   **Task B:** Composite Region Height (Depends on A).
     *   **Task C:** Generate Texture Mask (Depends on B). *The shader reads Task B's output to find the new slopes.*
     *   **Task D:** Composite Region Control Map (Depends on C).
-5.  **Execution:** The GPU executes A → B. Once B is done, C unlocks and executes, followed by D.
+5.  **Execution:** The GPU executes A → B. Once B is done, C unlocks and executes, followed by D. These are frame deferred. The scheduler and GPU manager will allow an entire frame for any stage to complete, but will process stages that do not depend on a previous stage. If a stage is completed early, but the next stage still needs to wait until next frame, it will wait even if it has enough data to partially process a stage.
 6.  **Result:** The mountain moves, and the rock texture dynamically repaints itself to stay on the steep sides of the moving mountain.
