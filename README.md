@@ -14,6 +14,10 @@ Terrain3DTools transforms the standard destructive terrain workflow into a flexi
 *   **Smart Region Optimization:** Divides the world into grid regions and employs dependency tracking to process only the specific regions affected by "dirty" layers.
 *   **Cascading Dependencies:** Moving a Height Layer automatically triggers updates for dependent Texture Layers (e.g., slope-based texturing) and Feature Layers (e.g., paths that conform to new heights).
 *   **Advanced Simulation:** Features a full GPU-based Hydraulic Erosion system, Thermal Weathering, and Global Flow simulation.
+*   **Path Creation:** Create paths for use in various types of features with configurable presets to easily create roads/paths/trenches/riverbeds etc. Custom profile can be saved and reused. Automatic grade and elevation warning and enforcement.
+*   **Instance Placement (WIP):** Create a mask and assign mesh instances inside of the influence of that mask.
+*   **Global Settings:** Manage and save global settings relating to most parts of the system. This ties directly in with path timing, path profiles, debugging texturing and other global settings.
+*   **Class Debugger:** Specialized debugger that uses aggregation and debug categories so that the system can be analyzed in different ways without flooding the logs.
 
 ---
 
@@ -38,25 +42,30 @@ This is the factory that generates the specific GPU work for a single layer. If 
 1.  **Clear:** A compute dispatch clears the layer's internal temporary R32F texture.
 2.  **Context Stitching:** To calculate slope or erosion correctly, the layer needs to know about the terrain *outside* its bounds. The pipeline dispatches a "Stitch" shader that samples neighbor regions to build a seamless context buffer. If the layer does not need new height data, it will still stictch in order to present a visualization when required. This can be optimized for when a layer is selected in the editor, however it does not seem necessay.
 3.  **Mask Stacking:** It iterates through the layer's `Masks`. Each mask injects its own compute shader commands into the chain. **Barriers** are automatically injected to prevent Read-After-Write hazards.
-4.  **Falloff:** A final dispatch applies the edge fade curve.
+4.  **Falloff:** A final dispatch applies the edge fade curve, configured by each layer and not always applied directly to the mask.
 
 **Result:** A fully rasterized, isolated texture representing *only* that layer's influence.
 
 ### 4. The Macro-Pipeline (`TerrainUpdateProcessor`)
-Once individual layer masks are generated, the Processor blends them into the final Region Data via a 6-phase pass:
+Once individual layer masks are generated, the Processor blends them into the final Region Data via a 10-phase pass:
 
 1.  **Height Layer Phase:** Generates influence masks for dirty height layers.
 2.  **Height Composite Phase:** Blends valid height masks into the **Region Heightmap (R32F)** using the layer's operation (Add/Subtract/Multiply).
 3.  **Texture Layer Phase:** Generates masks for texture layers. Crucially, this phase can read the *result* of Phase 2 to apply topological rules (Slope/Concavity).
 4.  **Texture Composite Phase:** Blends Texture IDs into the **Region Control Map (R32UI)** using bitwise operations.
 5.  **Feature Layer Phase:** Calculates geometry for complex features (IE: Paths, object placement with terrain data modifications).
-6.  ** - The purpose of the feature layers is to provide the edge case layer, some layers may place a building and need to modify height and texturing, or paths which have the same requirements. Future considerations are placing leaves on the ground, particle effects, and other object placement tasks which require reading and writing both height and texture data.
-7.  **Feature Application Phase:** Applies final modifications to both height and control maps.
+    ** - The purpose of the feature layers is to provide the edge case layer, some layers may place a building and need to modify height and texturing, or paths which have the same requirements. Future considerations are placing leaves on the ground, particle effects, and other object placement tasks which require reading and writing both height and texture data.
+6.  **Feature Application Phase:** Applies final modifications to both height and control maps.
+7.  **Exclusion Map Phase:** Finds feature layers that will exclude mesh instance placement.
+8.  **Texture Blend Smoothing Phase:** Optional pass for final overal blend smoothing of the final composited region textures.
+9.  **Instancer Layer Placement Phase:** Generates masks for instancer layers and places them in region buffers. This is essentially a feature layer, however it needs to process after other feature layers.
+10. **Selected Layer Visualizer Phase:** Generates the current data needed to for visual representation of the currently selected layer. 
 
 ### 5. Synchronization & Output
 1.  **GPU Sync:** The `AsyncGpuTaskManager` calls `RenderingDevice.Sync()`, blocking briefly to ensure all compute operations are finished.
 2.  **Zero-Copy Preview:** The `RegionMapManager` updates `RegionPreview` meshes. These use **Shared RIDs** (`TextureUtil`), allowing the viewport to display Compute Shader outputs immediately without copying data back to the CPU.
-3.  **Terrain3D Push:** Finally, the `TerrainLayerManager` reads the final textures and pushes the raw byte data into Terrain3D's native storage.
+3.  **Terrain3D Regions Textures Push:** The `TerrainLayerManager` reads the final textures and pushes the raw byte data into Terrain3D's native storage.
+4.  **Terrain3D Instance Push:** Finally, the `TerrainLayerManager` instructs the integrator to start updating  Terrain3D's instance data from the regions buffers.
 
 ---
 
@@ -77,6 +86,9 @@ Unlike standard splatmaps, this system writes to Terrain3D's specific **Control 
 *   **UV Angle:** 4 bits
 *   **UV Scale:** 3 bits
 *   **Flags:** Hole, Navigation, Auto-Shader (1 bit each)
+
+### Instance Buffers and Buffer Dictionaries (Region Data)
+Each region holds a dictionary of all of the mesh instance indecies buffers.
 
 ### GPU Backend
 The system bypasses high-level nodes for direct `RenderingDevice` control.
@@ -115,8 +127,17 @@ A path layer is specialized layer utilizing a `Curve3D`.
 *   **Rasterization:** Converts 3D curves into GPU-friendly segment buffers for efficient carving.
 *   **Zone Based:** Diffent zones may be required by different path desires. The user can add many zones which extent outward from the center of the path. IE: A road can have drainage, embankments, shoulders ect. These zones are configurable in the editor in a full featured profile editor.
 *   **Individual Zone Settings:** Height modification noise and texture modification noise are separate for every zone, so the user has full control on how the path modifies the terrain height and the terrain texturing separately for each zone. Each texture is seperated per zone. Any zone has individual properties the user can adjust allowing the user to have complete control of how the path looks.
-*   **Path Profiles:** Base profiles can be selected by default. This allows quick iteration on path layer designs.
-*   **Framework for Object Placement (WIP):** Placing meshes along the paths spline, or scattered in a zone is planned and the framework for that is in place, but not yet fully incorporated.
+*   **Path Profiles:** Base profiles can be selected by default. This allows quick iteration on path layer designs. Profiles can be customized and saved, and the base texture settings for zones can be defined globally in the Settings Manager so that the user does not have to change default profiles, or custom profiles, everytime they create a new path.
+*   **Path Profile Editing:** Profile cross-sections can be edited with custom visualization in the editor inspector and in the settings manager window.
+*   **Grade / Elevation Enforcement:** Paths have built in grade requirements and rivers have elevation restrictions. These are not automatically enforced, however a convenient warning will appear in the inspector that allows you to see violations and auto correct them. This is an undoable process. The Grade and Elevation requirements are settings that the user can adjust or ignore. 
+
+### `Feature Layer` (Instancer Layer WIP)
+*   **Masks:** Uses the same mask stack system and visualization as other layers.
+*   **Meshs:** Allows the placement of more than one instance in a given layer, this is intended to provide variation to mesh placement.
+*   **Transform Settings:** 
+      - Allows random settings for scale and rotation of each mesh index it will instance using a min/max setting for each.
+      - Align to Terrain:** Allows the object to be aligned to the terrain normals.
+*   **Placement Density and Minimum Spacing:** Defines how closely the meshes can be spaced, and how dense the placement is. These could be essentially the same setting however in ver dense placement, minimum spacing is has an effect of not allowing too much overlap, or none at all.
 
 ---
 
@@ -124,6 +145,7 @@ A path layer is specialized layer utilizing a `Curve3D`.
 
 Masks define the *shape* and *intensity* of a layer.
 
+*   Blur - Blurs the current layer influence mask. It has a distance setting and number of passes setting. This effectively smooths the mask.
 *   Concavity - Generates concave or convex mask data.
 *   Erosion - 4 stage erosion system, global flow, global flow blur passes, hydraulic erosion, thermal erosion, smoothing post pass Each pass is fully configurable. Bluring stages are gaussian. The user can decide to use all of the stages, or select which stages they want, and configure those stages.
 *   HeightRangeMask - Generates a mask based on min/max height and min/max falloff from those values.
@@ -137,6 +159,8 @@ Masks define the *shape* and *intensity* of a layer.
 ## 🛠️ Editor Tools & Debugging
 
 *   **Inspector Previews:** `TerrainLayerInspector` leverages the `LayerMaskPipeline` to run one-shot async GPU tasks, rendering live mask previews inside the Inspector panel.
+*   **Custom Layer UI Inspectors:** Layers have a standardized UI layout for custom UI tools and UI visualization tools. The height layer currently does not have a custom inspector.
+*   **Global Settings Manager:** A tab will appear in the viewports tool bar "Terrain Tools". This can be visible when the TerrainLayerManager or any Layer is selected in the scene hierarchy.
 *   **Debug Manager:** A centralized system for:
     *   **Aggregation:** Groups high-frequency logs to prevent console spam.
     *   **Categorization:** Filters logs by subsystem (e.g., `GpuResources`, `MaskGeneration`, `TerrainPush`).
