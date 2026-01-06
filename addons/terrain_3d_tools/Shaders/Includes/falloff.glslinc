@@ -1,0 +1,85 @@
+// Shared falloff calculation functions
+// Include this in shaders that need falloff computation
+
+#ifndef FALLOFF_GLSLINC
+#define FALLOFF_GLSLINC
+
+// Falloff type constants
+const uint FALLOFF_NONE = 0u;
+const uint FALLOFF_LINEAR = 1u;
+const uint FALLOFF_CIRCULAR = 2u;
+
+/// Samples a curve LUT with linear interpolation
+/// @param curve_values Array of curve sample values
+/// @param point_count Number of points in the curve
+/// @param t Normalized position (0-1)
+float sample_curve_lut(float curve_values[], int point_count, float t) {
+    if (point_count == 0) return 0.0;
+    if (point_count == 1) return clamp(curve_values[0], 0.0, 1.0);
+
+    t = clamp(t, 0.0, 1.0);
+    
+    float f_idx = t * float(point_count - 1);
+    int idx0 = int(f_idx);
+    int idx1 = min(idx0 + 1, point_count - 1);
+    
+    float val0 = curve_values[idx0];
+    float val1 = curve_values[idx1];
+    float frac = fract(f_idx);
+    
+    return mix(val0, val1, frac);
+}
+
+/// Calculates raw falloff distance based on type
+/// @param uv Normalized UV coordinates (0-1)
+/// @param falloff_type FALLOFF_NONE, FALLOFF_LINEAR, or FALLOFF_CIRCULAR
+float calculate_falloff_distance(vec2 uv, uint falloff_type) {
+    vec2 rel = (uv - 0.5) * 2.0;
+    
+    if (falloff_type == FALLOFF_LINEAR) {
+        return max(abs(rel.x), abs(rel.y));
+    } else if (falloff_type == FALLOFF_CIRCULAR) {
+        return length(rel);
+    }
+    
+    return 0.0; // FALLOFF_NONE
+}
+
+/// Calculates final falloff multiplier with curve and strength
+/// @param uv Normalized UV coordinates (0-1)
+/// @param falloff_type FALLOFF_NONE, FALLOFF_LINEAR, or FALLOFF_CIRCULAR
+/// @param strength Falloff strength (0-1), 0 = no falloff effect
+/// @param curve_values Array of curve sample values
+/// @param point_count Number of points in the curve
+float calculate_falloff(vec2 uv, uint falloff_type, float strength, float curve_values[], int point_count) {
+    if (falloff_type == FALLOFF_NONE || strength <= 0.0) {
+        return 1.0;
+    }
+    
+    float dist = calculate_falloff_distance(uv, falloff_type);
+    float base_falloff = clamp(1.0 - dist, 0.0, 1.0);
+    float curved_falloff = sample_curve_lut(curve_values, point_count, base_falloff);
+    
+    return mix(1.0, curved_falloff, strength);
+}
+
+/// Simplified falloff without curve (for visualization or when curve isn't available)
+/// Uses a simple smoothstep approximation
+/// @param uv Normalized UV coordinates (0-1)
+/// @param falloff_type FALLOFF_NONE, FALLOFF_LINEAR, or FALLOFF_CIRCULAR
+/// @param strength Falloff strength (0-1)
+float calculate_falloff_simple(vec2 uv, uint falloff_type, float strength) {
+    if (falloff_type == FALLOFF_NONE || strength <= 0.0) {
+        return 1.0;
+    }
+    
+    float dist = calculate_falloff_distance(uv, falloff_type);
+    float base_falloff = clamp(1.0 - dist, 0.0, 1.0);
+    
+    // Simple smoothstep approximation of a typical falloff curve
+    float curved_falloff = smoothstep(0.0, 1.0, base_falloff);
+    
+    return mix(1.0, curved_falloff, strength);
+}
+
+#endif // FALLOFF_GLSLINC
