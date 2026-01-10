@@ -171,7 +171,7 @@ The system uses a **Sequential Pipeline** pattern managed by `TerrainUpdateProce
     *   **Composite Phases**: Combine individual layer masks into region-specific data.
     *   **Application Phases**: Apply the composite results to the actual Terrain3D storage.
     *   **Visualization**: Updates editor-only previews (e.g., coloring the terrain to show a mask).
-3.  **Factory Pattern**: Phases do not create GPU tasks directly. They delegate to `LayerMaskPipeline` (a static factory), which assembles the specific shaders and dispatch parameters needed for that operation.
+3.  **Factory Pattern**: Phases do not create GPU tasks directly. They delegate to `LayerMaskPipeline` (a static factory) or the layer itself, which assembles the specific shaders and dispatch parameters needed for that operation.
 
 ```mermaid
 classDiagram
