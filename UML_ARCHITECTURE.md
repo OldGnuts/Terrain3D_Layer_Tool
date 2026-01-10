@@ -255,7 +255,7 @@ classDiagram
     
     class NoiseMask
     class SlopeMask
-    class ImageMask
+    class StampMask
 
     %% --- Relationships ---
     TerrainLayerBase <|-- HeightLayer
@@ -267,6 +267,7 @@ classDiagram
     TerrainLayerBase o-- TerrainMask : "Has Masks"
     TerrainMask <|-- NoiseMask
     TerrainMask <|-- SlopeMask
+    TerrainMask <|-- StampMask
     
     PathLayer ..> PathBakeState : "Captures"
     InstancerLayer ..> InstancerBakeState : "Captures"
