@@ -3,6 +3,12 @@
 ## 1. System Architecture (The "Big Picture")
 This diagram illustrates the static structure of the system, showing how the central manager orchestrates its subsystems and data.
 
+### Core Components
+*   **TerrainLayerManager**: The "Brain" of the system. It connects the Godot Editor UI, the `Terrain3D` node, and the internal processing logic. It owns the life cycle of all sub-managers.
+*   **UpdateScheduler**: Handles event throttling and debouncing. It ensures that rapid changes (like dragging a slider) don't trigger expensive updates every frame, only triggering a process cycle when the system is "quiet" or a threshold is met.
+*   **RegionMapManager**: The "Database" of the tool. It maintains a sparse dictionary of `RegionData` objects, effectively mapping 2D grid coordinates to GPU resources (Heightmaps, ControlMaps).
+*   **TerrainProcessingContext**: A transient data object created at the start of an update cycle. It gathers all necessary state (dirty layers, active regions) and is passed down the pipeline, ensuring phases are stateless and thread-safe.
+
 ```mermaid
 classDiagram
     %% --- Core Manager ---
@@ -157,6 +163,16 @@ sequenceDiagram
 ## 3. Pipeline & Phase Hierarchy
 Details the `TerrainUpdateProcessor` and its specific phases.
 
+### Pipeline Architecture
+The system uses a **Sequential Pipeline** pattern managed by `TerrainUpdateProcessor`.
+1.  **Context Creation**: A `TerrainProcessingContext` is built, capturing the snapshot of the current frame's requirements.
+2.  **Phase Execution**: The processor iterates through a list of `IProcessingPhase` implementations.
+    *   **Mask Phases**: Generate grayscale mask textures from noise, slopes, or curves.
+    *   **Composite Phases**: Combine individual layer masks into region-specific data.
+    *   **Application Phases**: Apply the composite results to the actual Terrain3D storage.
+    *   **Visualization**: Updates editor-only previews (e.g., coloring the terrain to show a mask).
+3.  **Factory Pattern**: Phases do not create GPU tasks directly. They delegate to `LayerMaskPipeline` (a static factory), which assembles the specific shaders and dispatch parameters needed for that operation.
+
 ```mermaid
 classDiagram
     class TerrainUpdateProcessor {
@@ -209,6 +225,13 @@ classDiagram
 
 ## 4. Layer & Mask Data System
 Inheritance hierarchy for Layers and Masks, including thread-safe state snapshots.
+
+### Data Model Concepts
+*   **Polymorphic Layers**: `TerrainLayerBase` provides the common interface.
+    *   *Height/Texture Layers*: Modify the terrain surface directly.
+    *   *Feature Layers (Path/Instancer)*: Generate specialized data (SDFs, density maps) used to modify other layers or place objects.
+*   **Thread-Safe Snapshots**: To allow background processing without race conditions, complex layers (like Path and Instancer) generate immutable **Snapshots** (`PathBakeState`, `InstancerBakeState`) of their data on the main thread. The GPU tasks read *only* from these snapshots, never the live UI objects.
+*   **Mask Compositing**: Each layer owns a list of `TerrainMasks`. These are processed sequentially (Add, Subtract, Multiply) to determine the final influence of the layer on any given pixel.
 
 ```mermaid
 classDiagram
