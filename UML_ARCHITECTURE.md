@@ -82,12 +82,23 @@ classDiagram
 ## 2. Task Creation & Execution Flow (Sequence Diagram)
 This diagram demonstrates the **Just-In-Time (JIT)** allocation pattern where expensive GPU resources are only created when the task manager is ready to execute them.
 
+### Key Concept: JIT Staging
+Complex operations, particularly those requiring height data (like texture masks or hydraulic erosion), use a **Staging** process embedded within the JIT Generator.
+*   **Lazy Construction**: The `AsyncGpuTask` is created with a `GeneratorFunc` (closure) that holds references to necessary data but allocates *nothing* initially.
+*   **Staging Execution**: When `Prepare()` is called (Frame 2):
+    1.  **HeightDataStager** collects relevant region heightmaps.
+    2.  Allocates a temporary TextureArray (`HeightmapArrayRid`) and MetadataBuffer.
+    3.  Generates "Stitch" commands to populate the array.
+    4.  These commands and resources are bundled into the final `GpuCommands` list.
+*   **Cleanup**: Staged resources are tracked and automatically moved to the **Resource Graveyard** after execution.
+
 ```mermaid
 sequenceDiagram
     participant TM as TerrainLayerManager
     participant Proc as TerrainUpdateProcessor
-    participant Phase as HeightLayerMaskPhase
+    participant Phase as TextureLayerMaskPhase
     participant Pipeline as LayerMaskPipeline
+    participant Stager as HeightDataStager
     participant Task as AsyncGpuTask
     participant Mgr as AsyncGpuTaskManager
     participant GPU as RenderingDevice
@@ -120,8 +131,15 @@ sequenceDiagram
         
         Mgr->>Task: Prepare() (JIT Allocation)
         activate Task
-        Note right of Task: Generator runs NOW. Allocates RIDs.
-        Task->>Task: Invoke GeneratorFunc
+        Note right of Task: Generator runs NOW.
+        
+        rect rgb(40, 40, 60)
+            Note right of Task: **Staging Sub-Process**
+            Task->>Stager: StageHeightDataForLayerAsync()
+            Stager-->>Task: Staged RIDs (TextureArray, Buffer)
+            Task->>Task: Build Compute Commands
+        end
+        
         Task-->>Mgr: Ready to Execute
         deactivate Task
 
@@ -133,7 +151,7 @@ sequenceDiagram
     
     GPU-->>Mgr: GPU Work Finished
     Mgr->>Task: OnComplete()
-    Mgr->>Mgr: QueueCleanup(Task Resources)
+    Mgr->>Mgr: QueueCleanup(Task Resources + Staged RIDs)
 ```
 
 ## 3. Pipeline & Phase Hierarchy
@@ -185,6 +203,7 @@ classDiagram
     IProcessingPhase <|-- SelectedLayerVisualizationPhase
     
     HeightLayerMaskPhase ..> LayerMaskPipeline : "Uses Factory"
+    TextureLayerMaskPhase ..> LayerMaskPipeline : "Uses Factory"
     FeatureLayerMaskPhase ..> LayerMaskPipeline : "Uses Factory"
 ```
 
@@ -274,7 +293,25 @@ classDiagram
 ```
 
 ## 5. GPU Abstraction Layer
-Low-level utility classes for the RenderingDevice interface.
+Low-level utility classes for the RenderingDevice interface, managing the lifecycle of compute shaders and resources.
+
+### Component Details
+*   **AsyncGpuTaskManager**: The central scheduler.
+    *   **Batching**: Aggregates tasks into batches (max 128) to minimize CPU/GPU synchronization overhead.
+    *   **Resource Graveyard**: Implements deferred cleanup. Resources (RIDs) and Shaders are queued for destruction after a safe frame delay (default 3 frames) to prevent "Invalid ID" errors while the GPU is still working.
+    *   **Dependency Resolution**: Manages a DAG of tasks, ensuring dependencies complete before dependents start.
+*   **AsyncGpuTask**: Represents a unit of work.
+    *   **JIT Preparation**: Supports "Lazy" generators that allocate heavy GPU resources (textures, buffers) only immediately before execution, reducing VRAM pressure.
+    *   **Resource Extraction**: Transfers ownership of temporary resources (like UniformSets) to the Manager's graveyard upon completion.
+*   **AsyncComputeOperation**: A transient builder pattern.
+    *   Constructs `RDUniform` sets and Compute Pipeline State objects.
+    *   Validates shader/pipeline validity before dispatch.
+    *   Auto-tracks temporary RIDs (like UniformSets) created during setup.
+*   **GpuKernels**: A static library of standard compute operations.
+    *   *Clear*: Resets textures to specific colors.
+    *   *Stitch*: Combines multiple region heightmaps into a single large texture for layer processing.
+    *   *Falloff*: Applies distance-based attenuation using curves.
+    *   *Copy*: robust texture-to-texture copying via compute.
 
 ```mermaid
 classDiagram
@@ -292,6 +329,7 @@ classDiagram
         +CreateClearCommands()
         +CreateStitchHeightmapCommands()
         +CreateFalloffCommands()
+        +CreateCopyTextureCommands()
     }
 
     class AsyncComputeOperation {
