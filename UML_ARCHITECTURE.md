@@ -175,8 +175,14 @@ classDiagram
     TerrainUpdateProcessor o-- IProcessingPhase : "Has Phases"
     IProcessingPhase <|-- HeightLayerMaskPhase
     IProcessingPhase <|-- RegionHeightCompositePhase
+    IProcessingPhase <|-- TextureLayerMaskPhase
+    IProcessingPhase <|-- RegionTextureCompositePhase
+    IProcessingPhase <|-- FeatureLayerMaskPhase
+    IProcessingPhase <|-- FeatureLayerApplicationPhase
+    IProcessingPhase <|-- ExclusionMapWritePhase
+    IProcessingPhase <|-- BlendGradientSmoothingPhase
     IProcessingPhase <|-- InstancerPlacementPhase
-    IProcessingPhase <|.. "others..."
+    IProcessingPhase <|-- SelectedLayerVisualizationPhase
     
     HeightLayerMaskPhase ..> LayerMaskPipeline : "Uses Factory"
     FeatureLayerMaskPhase ..> LayerMaskPipeline : "Uses Factory"
