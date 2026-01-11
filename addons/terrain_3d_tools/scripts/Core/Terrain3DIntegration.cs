@@ -137,7 +137,7 @@ namespace Terrain3DTools.Core
                     }
                 }
 
-                PushImagesToTerrain3D(regionCoord, heightImage, controlImage);
+                PushImagesToTerrain3DLayers(regionCoord, heightImage, controlImage);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
                     $"Pushed region {regionCoord}");
@@ -202,9 +202,9 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
-        /// Pushes height and control images to Terrain3D region.
+        /// Pushes height and control images into Terrain3D's non-destructive layer stack.
         /// </summary>
-        private void PushImagesToTerrain3D(Vector2I regionCoord, Image heightImage, Image controlImage)
+        private void PushImagesToTerrain3DLayers(Vector2I regionCoord, Image heightImage, Image controlImage)
         {
             var t3DData = _terrain3D.Data;
 
@@ -212,6 +212,56 @@ namespace Terrain3DTools.Core
             {
                 t3DData.AddRegionBlank(regionCoord, false);
             }
+
+            if (heightImage == null && controlImage == null)
+            {
+                ReleaseRegionLayers(regionCoord);
+                return;
+            }
+
+            long heightExternalId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Height);
+            long controlExternalId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Control);
+
+            int writesRemaining = 0;
+            if (heightImage != null)
+                writesRemaining++;
+            if (controlImage != null)
+                writesRemaining++;
+
+            bool wroteAnyLayer = false;
+
+            if (heightImage != null)
+            {
+                bool shouldUpdate = (--writesRemaining == 0);
+                wroteAnyLayer |= TrySetMapLayer(regionCoord,
+                    Terrain3DRegion.MapType.Height,
+                    heightImage,
+                    heightExternalId,
+                    shouldUpdate);
+            }
+            else
+            {
+                bool shouldUpdate = controlImage == null;
+                TryReleaseMapLayer(heightExternalId, true, shouldUpdate);
+            }
+
+            if (controlImage != null)
+            {
+                bool shouldUpdate = (--writesRemaining == 0);
+                wroteAnyLayer |= TrySetMapLayer(regionCoord,
+                    Terrain3DRegion.MapType.Control,
+                    controlImage,
+                    controlExternalId,
+                    shouldUpdate);
+            }
+            else
+            {
+                bool shouldUpdate = heightImage == null;
+                TryReleaseMapLayer(controlExternalId, true, shouldUpdate);
+            }
+
+            if (!wroteAnyLayer)
+                return;
 
             var t3DRegion = t3DData.GetRegion(regionCoord);
             if (t3DRegion == null)
@@ -221,13 +271,55 @@ namespace Terrain3DTools.Core
                 return;
             }
 
-            if (heightImage != null)
-                t3DRegion.SetMap(Terrain3DRegion.MapType.Height, heightImage);
-
-            if (controlImage != null)
-                t3DRegion.SetMap(Terrain3DRegion.MapType.Control, controlImage);
-
             t3DRegion.Edited = true;
+        }
+
+        private bool TrySetMapLayer(
+            Vector2I regionCoord,
+            Terrain3DRegion.MapType mapType,
+            Image image,
+            long externalLayerId,
+            bool shouldUpdate)
+        {
+            try
+            {
+                if (_terrain3D == null || !GodotObject.IsInstanceValid(_terrain3D))
+                {
+                    DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                        "Terrain3D instance is null or invalid while attempting to set map layer");
+                    return false;
+                }
+
+                var terrainData = _terrain3D.Data;
+                if (terrainData == null || !GodotObject.IsInstanceValid(terrainData))
+                {
+                    DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                        "Terrain3D data is null or invalid while attempting to set map layer");
+                    return false;
+                }
+
+                var stampLayer = terrainData.SetMapLayer(
+                    regionCoord,
+                    (long)mapType,
+                    image,
+                    externalLayerId,
+                    shouldUpdate);
+
+                if (stampLayer == null)
+                {
+                    DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
+                        $"Terrain3D returned null layer for {mapType} at {regionCoord} (layerId={externalLayerId})");
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Failed to set {mapType} layer for {regionCoord}: {ex.Message}");
+                return false;
+            }
         }
 
         /// <summary>
@@ -256,22 +348,21 @@ namespace Terrain3DTools.Core
             }
 
             List<Vector2I> regionLocations = GetRegionLocations();
-            int removedCount = 0;
+            int removedLayerCount = 0;
             foreach (Vector2I regionLocation in regionLocations)
             {
                 if (!allActiveRegions.Contains(regionLocation))
                 {
-                    t3DData.RemoveRegionl(regionLocation, false);
-                    removedCount++;
+                    removedLayerCount += ReleaseRegionLayers(regionLocation);
                 }
             }
 
             try
             {
-                t3DData.UpdateMaps(Terrain3DRegion.MapType.Max, true);
+                t3DData.UpdateMaps((long)Terrain3DRegion.MapType.Max, true);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
-                    $"Finalized: removed {removedCount}, added {addedCount}, on frame {Engine.GetProcessFrames()}");
+                    $"Finalized: removed {removedLayerCount} plugin layer(s), added {addedCount} region(s), on frame {Engine.GetProcessFrames()}");
             }
             catch (System.Exception ex)
             {
@@ -466,6 +557,58 @@ namespace Terrain3DTools.Core
             }
 
             return result;
+        }
+
+        private static long GetExternalLayerId(Vector2I regionCoord, Terrain3DRegion.MapType mapType)
+        {
+            string token = $"{nameof(Terrain3DIntegration)}:{mapType}:{regionCoord.X}:{regionCoord.Y}";
+            return unchecked((long)GD.Hash(token));
+        }
+
+        private bool TryReleaseMapLayer(long externalLayerId, bool removeLayer, bool shouldUpdate)
+        {
+            try
+            {
+                if (_terrain3D == null || !GodotObject.IsInstanceValid(_terrain3D))
+                    return false;
+
+                var terrainData = _terrain3D.Data;
+                if (terrainData == null || !GodotObject.IsInstanceValid(terrainData))
+                    return false;
+
+                return terrainData.ReleaseMapLayer(externalLayerId, removeLayer, shouldUpdate);
+            }
+            catch (Exception ex)
+            {
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Failed to release layer {externalLayerId}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private int ReleaseRegionLayers(Vector2I regionCoord)
+        {
+            int removedLayers = 0;
+
+            var heightId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Height);
+            if (TryReleaseMapLayer(heightId, true, false))
+            {
+                removedLayers++;
+            }
+
+            var controlId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Control);
+            if (TryReleaseMapLayer(controlId, true, false))
+            {
+                removedLayers++;
+            }
+
+            if (removedLayers == 0)
+            {
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
+                    $"No plugin layers to release for region {regionCoord}");
+            }
+
+            return removedLayers;
         }
         #endregion
     }
