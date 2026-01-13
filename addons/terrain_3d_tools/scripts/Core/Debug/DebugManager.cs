@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Godot.Collections;
-using Terrain3DWrapper;
 using System.ComponentModel;
 
 namespace Terrain3DTools.Core.Debug
@@ -580,4 +579,5 @@ namespace Terrain3DTools.Core.Debug
             return Instance._registeredClasses.OrderBy(c => c).ToArray();
         }
     }
+
 }
