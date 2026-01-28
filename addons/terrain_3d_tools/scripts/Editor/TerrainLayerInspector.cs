@@ -142,6 +142,9 @@ namespace Terrain3DTools.Editor
                     (FeatureLayer)layer,
                     layer.Size.X,
                     layer.Size.Y,
+                    new Rid(),
+                    new Rid(),
+                    0,
                     new List<AsyncGpuTask>(),
                     onComplete
                 );
