@@ -27,6 +27,8 @@ namespace Terrain3DTools.Layers
         private int _seed = 12345;
         private float _exclusionThreshold = 0.5f;
         private bool _meshEntriesSubscribed = false;
+        private int _previousMeshEntryCount = -1;
+        private HashSet<int> _previousMeshAssetIds = new();
         #endregion
 
         #region Exported Properties
@@ -78,6 +80,21 @@ namespace Terrain3DTools.Layers
         #region Feature Layer Overrides
         public override bool IsInstancer => true;
 
+        // TODO: 
+        // We needed to use _Process to poll changes in the MeshEntries array 
+        // in order to be able to have an immediate update when meshes where removed
+        // this seems to be a limitation in Godot where the array is modified and does not
+        // send a signal. Ideally we would use a signal to avoid unnecessay update loops.
+        // The property setter does not seem to send the signal when the array is changed.
+        public override void _Process(double delta)
+        {
+            base._Process(delta);
+
+            if (Engine.IsEditorHint())
+            {
+                CheckMeshEntriesChanged();
+            }
+        }
         public override void _Ready()
         {
             base._Ready();
@@ -90,6 +107,11 @@ namespace Terrain3DTools.Layers
                 LayerName = "Instancer " + IdGenerator.GenerateShortUid();
 
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
+
+            _previousMeshEntryCount = _meshEntries?.Count ?? 0;
+            _previousMeshAssetIds = new HashSet<int>(GetMeshAssetIds());
+
+            CheckMeshEntriesChanged();
         }
 
         public override void _EnterTree()
@@ -203,6 +225,54 @@ namespace Terrain3DTools.Layers
         #endregion
 
         #region Dependency Tracking
+
+        /// <summary>
+        /// Detects when mesh entries are added/removed via the inspector.
+        /// Godot modifies arrays in-place without calling the property setter.
+        /// </summary>
+        private void CheckMeshEntriesChanged()
+        {
+            int currentCount = _meshEntries?.Count ?? 0;
+
+            // First run - initialize tracking
+            if (_previousMeshEntryCount < 0)
+            {
+                _previousMeshEntryCount = currentCount;
+                _previousMeshAssetIds = new HashSet<int>(GetMeshAssetIds());
+                return;
+            }
+
+            bool changed = false;
+
+            // Check if count changed (entry added or removed)
+            if (currentCount != _previousMeshEntryCount)
+            {
+                changed = true;
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying,
+                    $"Mesh entry count changed: {_previousMeshEntryCount} -> {currentCount}");
+            }
+
+            // Also check if mesh IDs changed (entry's MeshAssetId was modified)
+            var currentIds = new HashSet<int>(GetMeshAssetIds());
+            if (!changed && !currentIds.SetEquals(_previousMeshAssetIds))
+            {
+                changed = true;
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying,
+                    $"Mesh asset IDs changed: [{string.Join(", ", _previousMeshAssetIds)}] -> [{string.Join(", ", currentIds)}]");
+            }
+
+            if (changed)
+            {
+                _previousMeshEntryCount = currentCount;
+                _previousMeshAssetIds = currentIds;
+
+                // Re-subscribe in case entries were added/removed
+                UnsubscribeFromEntries();
+                SubscribeToEntries();
+
+                ForceDirty();
+            }
+        }
         /// <summary>
         /// Returns true if this instancer's mask uses texture data.
         /// Used to determine if texture layer changes should dirty this layer.
