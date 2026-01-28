@@ -178,6 +178,12 @@ namespace Terrain3DTools.Visuals
             var settings = GlobalToolSettingsManager.Current;
             if (settings == null) return true; // Default to enabled if no settings
 
+            // Handle manualedit layers
+            if (_ownerLayer is ManualEditLayer manualEditLayer)
+            {
+                return false;
+            }
+
             return _ownerLayer.GetLayerType() switch
             {
                 LayerType.Height => settings.EnableHeightLayerVisualization,
