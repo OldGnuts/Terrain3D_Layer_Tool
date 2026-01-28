@@ -56,8 +56,8 @@ namespace Terrain3DTools.Core
 
         private readonly int _regionSize;
         private readonly Vector2I _minMaxRegionCoords;
-        private readonly System.Collections.Generic.Dictionary<string, Rect2I> _previousLayerBounds = new();
-        private HashSet<string> _knownLayerNames = new();
+        private readonly System.Collections.Generic.Dictionary<ulong, Rect2I> _previousLayerBounds = new();
+        private HashSet<ulong> _knownLayerIds = new();
         private readonly System.Collections.Generic.Dictionary<Vector2I, TieredRegionLayers> _regionToLayersMap = new();
 
         private readonly HashSet<Vector2I> _regionsUpdatedThisCycle = new();
@@ -223,20 +223,22 @@ namespace Terrain3DTools.Core
         {
             DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying, "DetectLayerChanges");
 
-            var currentLayerNames = new HashSet<string>();
+            var currentLayerIds = new HashSet<ulong>();
             int newLayerCount = 0;
             int movedLayerCount = 0;
 
             foreach (var layer in currentLayers)
             {
                 if (layer == null) continue;
-                currentLayerNames.Add(layer.LayerName);
+
+                ulong layerId = layer.GetInstanceId();
+                currentLayerIds.Add(layerId);
 
                 var currentBounds = TerrainCoordinateHelper.GetRegionBoundsForLayer(layer, _regionSize);
-                bool isNewLayer = !_knownLayerNames.Contains(layer.LayerName);
+                bool isNewLayer = !_knownLayerIds.Contains(layerId);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
-                    $"Checking layer '{layer.LayerName}': Pos={layer.GlobalPosition}, Bounds={currentBounds}");
+                    $"Checking layer '{layer.LayerName}' (ID: {layerId}): Pos={layer.GlobalPosition}, Bounds={currentBounds}");
 
                 if (isNewLayer)
                 {
@@ -246,7 +248,7 @@ namespace Terrain3DTools.Core
                     DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
                         $"NEW layer '{layer.LayerName}' - marked {currentBounds.GetRegionCoords().Count()} regions");
                 }
-                else if (_previousLayerBounds.TryGetValue(layer.LayerName, out var previousBounds))
+                else if (_previousLayerBounds.TryGetValue(layerId, out var previousBounds))
                 {
                     DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
                         $"Existing layer '{layer.LayerName}': PrevBounds={previousBounds}, CurBounds={currentBounds}");
@@ -263,7 +265,6 @@ namespace Terrain3DTools.Core
                     }
                     else if (layer.PositionDirty)
                     {
-                        // Bounds didn't change but layer says it moved - still mark regions dirty
                         DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
                             $"Layer '{layer.LayerName}' is position dirty but bounds unchanged - marking regions anyway");
 
@@ -271,30 +272,30 @@ namespace Terrain3DTools.Core
                     }
                 }
 
-                _previousLayerBounds[layer.LayerName] = currentBounds;
+                _previousLayerBounds[layerId] = currentBounds;
             }
 
             // Detect deleted layers
-            var deletedLayerNames = _knownLayerNames.Except(currentLayerNames).ToList();
-            if (deletedLayerNames.Count > 0)
+            var deletedLayerIds = _knownLayerIds.Except(currentLayerIds).ToList();
+            if (deletedLayerIds.Count > 0)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerLifecycle,
-                    $"Deleted {deletedLayerNames.Count} layer(s)");
+                    $"Deleted {deletedLayerIds.Count} layer(s)");
 
-                foreach (var deletedName in deletedLayerNames)
+                foreach (var deletedId in deletedLayerIds)
                 {
-                    if (_previousLayerBounds.TryGetValue(deletedName, out var lastBounds))
+                    if (_previousLayerBounds.TryGetValue(deletedId, out var lastBounds))
                     {
                         MarkRegionsInBoundsDirty(lastBounds, regionsToUpdate);
-                        _previousLayerBounds.Remove(deletedName);
+                        _previousLayerBounds.Remove(deletedId);
                     }
                 }
             }
 
-            _knownLayerNames = currentLayerNames;
+            _knownLayerIds = currentLayerIds;
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.RegionDependencies,
-                $"DetectLayerChanges complete: New={newLayerCount}, Moved={movedLayerCount}, Deleted={deletedLayerNames.Count}, BoundaryRegions={regionsToUpdate.Count}");
+                $"DetectLayerChanges complete: New={newLayerCount}, Moved={movedLayerCount}, Deleted={deletedLayerIds.Count}, BoundaryRegions={regionsToUpdate.Count}");
 
             DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.LayerDirtying, "DetectLayerChanges");
         }

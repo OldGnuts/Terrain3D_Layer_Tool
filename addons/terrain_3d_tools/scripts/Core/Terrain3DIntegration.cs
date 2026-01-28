@@ -421,7 +421,7 @@ namespace Terrain3DTools.Core
                 var colors = new Color[0];
 
                 // Update on the last mesh only
-                bool shouldUpdate = (i == meshIdList.Count - 1);
+                bool shouldUpdate = true;
 
                 try
                 {
@@ -448,6 +448,30 @@ namespace Terrain3DTools.Core
         }
 
         #region Helpers
+
+        /// <summary>
+        /// Clears instances for a specific mesh in a specific region.
+        /// Used when cleaning up removed layers.
+        /// </summary>
+        public void ClearInstancesForMesh(Vector2I regionCoords, int meshId)
+        {
+            if (!IsReadyForInstancePush()) return;
+
+            try
+            {
+                var instancer = _terrain3D.Instancer;
+                if (instancer != null && GodotObject.IsInstanceValid(instancer))
+                {
+                    instancer.ClearByLocation(regionCoords, meshId);
+                    GD.Print($"Cleared instances for mesh {meshId} in region {regionCoords}");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Failed to clear instances for mesh {meshId} in region {regionCoords}: {ex.Message}");
+            }
+        }
         public List<Vector2I> GetRegionLocations()
         {
             var result = new List<Vector2I>();

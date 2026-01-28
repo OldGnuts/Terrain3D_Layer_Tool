@@ -57,6 +57,7 @@ namespace Terrain3DTools.Core
         private HashSet<Vector2I> _regionsWithPendingInstances = new();
         private Dictionary<ulong, Dictionary<Vector2I, InstanceBuffer>> _pendingInstanceBuffers = new();
         private Dictionary<ulong, HashSet<Vector2I>> _previousInstanceRegions = new();
+        private Dictionary<ulong, HashSet<int>> _previousMeshIdsByLayer = new();
         private bool _fullyInitialized = false;
 
         // Debug
@@ -420,6 +421,12 @@ namespace Terrain3DTools.Core
                 .Where(l => GodotObject.IsInstanceValid(l) && l.PositionDirty)
                 .ToHashSet();
 
+            if (positionDirtyLayers.Count > 0)
+            {
+                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
+                    $"Position-dirty layers: {string.Join(", ", positionDirtyLayers.Select(l => l.LayerName))}");
+            }
+
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                 $"Layers: Total={allLayers.Count}, MaskDirty={maskDirtyLayers.Count}, PositionDirty={positionDirtyLayers.Count}");
 
@@ -440,7 +447,7 @@ namespace Terrain3DTools.Core
             );
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionLifecycle,
-                $"Managed: {_regionMapManager.GetManagedRegionCoords().Count}, ToRemove: {regionsToRemove.Count}");
+                $"Managed: {_regionMapManager.GetManagedRegionCoords().Count}, BoundaryDirty: {boundaryDirtyRegions.Count}, ToRemove: {regionsToRemove.Count}");
 
             bool hasChanges = maskDirtyLayers.Count > 0 ||
                              positionDirtyLayers.Count > 0 ||
@@ -759,13 +766,30 @@ namespace Terrain3DTools.Core
             int totalBuffers = 0;
             int totalInstances = 0;
 
-            foreach (var layerBuffers in _pendingInstanceBuffers.Values)
+            foreach (var layerBuffers in _pendingInstanceBuffers)
             {
-                foreach (var buffer in layerBuffers.Values)
+                ulong layerId = layerBuffers.Key;
+
+                foreach (var regionBufferPair in layerBuffers.Value)
                 {
+                    Vector2I regionCoords = regionBufferPair.Key;
+                    InstanceBuffer buffer = regionBufferPair.Value;
+
                     buffer.Readback();
                     totalBuffers++;
                     totalInstances += buffer.InstanceCount;
+
+                    // DIAGNOSTIC: Show which mesh IDs are present after readback
+                    var presentMeshIds = buffer.GetPresentMeshIndices();
+                    DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush,
+                        $"Buffer readback for layer {layerId}, region {regionCoords}: {buffer.InstanceCount} total instances");
+
+                    foreach (int meshId in presentMeshIds)
+                    {
+                        int count = buffer.GetTransformsForMesh(meshId).Length;
+                        DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush,
+                            $"  MeshId {meshId}: {count} instances");
+                    }
                 }
             }
 
@@ -825,10 +849,10 @@ namespace Terrain3DTools.Core
         /// - orphanedBuffers: buffers to remove (layer left the region)
         /// </summary>
         private (
-            List<(Vector2I regionCoords, int meshAssetId, Transform3D[] transforms)> instanceData,
-            Dictionary<Vector2I, HashSet<int>> regionsToClear,
-            List<(Vector2I regionCoords, ulong layerId)> orphanedBuffers
-        ) CollectAggregatedInstanceData()
+    List<(Vector2I regionCoords, int meshAssetId, Transform3D[] transforms)> instanceData,
+    Dictionary<Vector2I, HashSet<int>> regionsToClear,
+    List<(Vector2I regionCoords, ulong layerId)> orphanedBuffers
+) CollectAggregatedInstanceData()
         {
             var result = new List<(Vector2I, int, Transform3D[])>();
             var regionsToClear = new Dictionary<Vector2I, HashSet<int>>();
@@ -842,17 +866,25 @@ namespace Terrain3DTools.Core
             var layerLookup = allInstancerLayers.ToDictionary(l => l.GetInstanceId(), l => l);
             var dirtyLayerIds = _pendingInstanceBuffers.Keys.ToHashSet();
 
+            // Track current mesh IDs for this cycle
+            var currentMeshIdsByLayer = new Dictionary<ulong, HashSet<int>>();
+
             // First pass: determine which regions actually have instance data
             var regionsWithData = new Dictionary<ulong, HashSet<Vector2I>>();
 
             foreach (var layerId in dirtyLayerIds)
             {
                 if (!_pendingInstanceBuffers.TryGetValue(layerId, out var pendingRegions)) continue;
+                if (!layerLookup.TryGetValue(layerId, out var layer)) continue;
 
                 regionsWithData[layerId] = new HashSet<Vector2I>();
+                currentMeshIdsByLayer[layerId] = new HashSet<int>(layer.GetMeshAssetIds());
 
-                foreach (var (regionCoords, buffer) in pendingRegions)
+                foreach (var regionBufferPair in pendingRegions)
                 {
+                    Vector2I regionCoords = regionBufferPair.Key;
+                    InstanceBuffer buffer = regionBufferPair.Value;
+
                     if (buffer.HasReadbackData && buffer.InstanceCount > 0)
                     {
                         regionsWithData[layerId].Add(regionCoords);
@@ -861,7 +893,6 @@ namespace Terrain3DTools.Core
                     }
                     else
                     {
-                        // Skip regions with 0 instances - mask doesn't actually overlap
                         DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush,
                             $"Skipping region {regionCoords} - 0 instances (mask doesn't overlap)");
                     }
@@ -885,11 +916,25 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            // Build regions to clear: only regions with data OR truly orphaned
+            // Build regions to clear - include BOTH current AND previous mesh IDs
             foreach (var layerId in dirtyLayerIds)
             {
                 if (!layerLookup.TryGetValue(layerId, out var layer)) continue;
-                var meshIds = layer.GetMeshAssetIds();
+
+                // Get current mesh IDs
+                var currentMeshIds = currentMeshIdsByLayer.GetValueOrDefault(layerId, new HashSet<int>());
+
+                // Get previous mesh IDs (for removed meshes)
+                var previousMeshIds = _previousMeshIdsByLayer.GetValueOrDefault(layerId, new HashSet<int>());
+
+                // Union of current and previous - ensures removed meshes get cleared
+                var allMeshIdsToConsider = new HashSet<int>(currentMeshIds);
+                allMeshIdsToConsider.UnionWith(previousMeshIds);
+
+                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.TerrainPush,
+                    $"Layer {layerId}: current meshes [{string.Join(", ", currentMeshIds)}], " +
+                    $"previous meshes [{string.Join(", ", previousMeshIds)}], " +
+                    $"clearing [{string.Join(", ", allMeshIdsToConsider)}]");
 
                 // Clear regions that have fresh data
                 if (regionsWithData.TryGetValue(layerId, out var dataRegions))
@@ -901,7 +946,8 @@ namespace Terrain3DTools.Core
                     {
                         if (!regionsToClear.ContainsKey(regionCoords))
                             regionsToClear[regionCoords] = new HashSet<int>();
-                        foreach (var meshId in meshIds)
+
+                        foreach (var meshId in allMeshIdsToConsider)
                             regionsToClear[regionCoords].Add(meshId);
                     }
                 }
@@ -916,7 +962,9 @@ namespace Terrain3DTools.Core
                     {
                         if (!regionsToClear.ContainsKey(regionCoords))
                             regionsToClear[regionCoords] = new HashSet<int>();
-                        foreach (var meshId in meshIds)
+
+                        // Use ALL mesh IDs (current + previous) for orphaned regions
+                        foreach (var meshId in allMeshIdsToConsider)
                             regionsToClear[regionCoords].Add(meshId);
 
                         orphanedBuffers.Add((regionCoords, layerId));
@@ -1000,12 +1048,17 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            // Update tracking: only regions that actually had data
+            // Update tracking for BOTH regions AND mesh IDs
             foreach (var layerId in dirtyLayerIds)
             {
                 if (regionsWithData.TryGetValue(layerId, out var dataRegions))
                 {
                     _previousInstanceRegions[layerId] = new HashSet<Vector2I>(dataRegions);
+                }
+
+                if (currentMeshIdsByLayer.TryGetValue(layerId, out var meshIds))
+                {
+                    _previousMeshIdsByLayer[layerId] = new HashSet<int>(meshIds);
                 }
             }
 
@@ -1053,17 +1106,35 @@ namespace Terrain3DTools.Core
 
             foreach (var layerId in removedLayerIds)
             {
+                // Get the mesh IDs this layer was using
+                var meshIds = _previousMeshIdsByLayer.GetValueOrDefault(layerId, new HashSet<int>());
+
                 // Clean up instance buffers from all regions this layer touched
                 if (_previousInstanceRegions.TryGetValue(layerId, out var regions))
                 {
                     foreach (var regionCoords in regions)
                     {
+                        // Clear instances for all mesh IDs this layer used
+                        foreach (var meshId in meshIds)
+                        {
+                            try
+                            {
+                                _terrain3DIntegration?.ClearInstancesForMesh(regionCoords, meshId);
+                            }
+                            catch (System.Exception ex)
+                            {
+                                DebugManager.Instance?.LogError(DEBUG_CLASS,
+                                    $"Failed to clear mesh {meshId} in region {regionCoords}: {ex.Message}");
+                            }
+                        }
+
                         var regionData = _regionMapManager.GetRegionData(regionCoords);
                         regionData?.RemoveInstanceBuffer(layerId);
                     }
                 }
 
                 _previousInstanceRegions.Remove(layerId);
+                _previousMeshIdsByLayer.Remove(layerId);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                     $"Cleaned up tracking and buffers for removed instancer layer {layerId}");

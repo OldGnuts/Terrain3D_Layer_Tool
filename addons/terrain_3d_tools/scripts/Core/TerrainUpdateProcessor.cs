@@ -36,7 +36,8 @@ namespace Terrain3DTools.Core
         private readonly SelectedLayerVisualizationPhase _selectedLayerVisualizationPhase;
         private readonly BlendGradientSmoothingPhase _blendGradientSmoothingPhase;
         private readonly ExclusionMapWritePhase _exclusionMapWritePhase;           // ADD
-        private readonly InstancerPlacementPhase _instancerPlacementPhase;         // ADD
+        private readonly InstancerPlacementPhase _instancerPlacementPhase;
+        private readonly ManualEditApplicationPhase _manualEditApplicationPhase;       // ADD
 
         public TerrainUpdateProcessor(
             RegionMapManager regionMapManager,
@@ -58,12 +59,13 @@ namespace Terrain3DTools.Core
             _selectedLayerVisualizationPhase = new SelectedLayerVisualizationPhase();
             _blendGradientSmoothingPhase = new BlendGradientSmoothingPhase();
             _exclusionMapWritePhase = new ExclusionMapWritePhase();               // ADD
-            _instancerPlacementPhase = new InstancerPlacementPhase();             // ADD
+            _instancerPlacementPhase = new InstancerPlacementPhase();
+            _manualEditApplicationPhase = new ManualEditApplicationPhase();          // ADD
 
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
-                $"TerrainUpdateProcessor initialized with 10 phase handlers");
+                $"TerrainUpdateProcessor initialized with 11 phase handlers");
         }
 
         public void ProcessUpdatesAsync(
@@ -256,7 +258,17 @@ namespace Terrain3DTools.Core
                     $"Phase 8 complete - {context.BlendSmoothingTasks?.Count ?? 0} smoothing tasks created");
             }
 
-            // PHASE 9: Instancer Placement
+            // PHASE 9: Manual Edit Application 
+            if (context.AllDirtyRegions.Count > 0)
+            {
+                DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase9_ManualEditApplication");
+                _manualEditApplicationPhase.Execute(context);
+                DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase9_ManualEditApplication");
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
+                    $"Phase 9 complete - {context.ManualEditApplicationTasks?.Count ?? 0} manual edit tasks created");
+            }
+
+            // PHASE 10: Instancer Placement
             var instancerLayers = context.DirtyFeatureLayers
                 .OfType<InstancerLayer>()
                 .Where(l => GodotObject.IsInstanceValid(l))
@@ -268,20 +280,20 @@ namespace Terrain3DTools.Core
                 _instancerPlacementPhase.Execute(context);
                 DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase9_InstancerPlacement");
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
-                    $"Phase 9 complete - {context.InstancerPlacementTasks?.Count ?? 0} instancer layer(s) processed");
+                    $"Phase 10 complete - {context.InstancerPlacementTasks?.Count ?? 0} instancer layer(s) processed");
             }
             else
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                    "Phase 9 skipped - no instancer layers or no dirty regions");
+                    "Phase 10 skipped - no instancer layers or no dirty regions");
             }
 
-            // PHASE 10: Selected Layer Visualization
+            // PHASE 11: Selected Layer Visualization
             if (context.SelectedLayer != null)
             {
-                DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase10_SelectedLayerVisualization");
+                DebugManager.Instance?.StartTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase11_SelectedLayerVisualization");
                 _selectedLayerVisualizationPhase.Execute(context);
-                DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase10_SelectedLayerVisualization");
+                DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution, "Phase11_SelectedLayerVisualization");
             }
             else
             {
@@ -297,35 +309,12 @@ namespace Terrain3DTools.Core
                 (context.FeatureLayerMaskTasks?.Count ?? 0) +
                 (context.RegionFeatureApplicationTasks?.Count ?? 0) +
                 (context.ExclusionWriteTasks?.Count ?? 0) +
+                (context.ManualEditApplicationTasks?.Count ?? 0) + 
+                (context.BlendSmoothingTasks?.Count ?? 0) +
                 (context.InstancerPlacementTasks?.Values.Sum(d => d.Count) ?? 0);
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
                 $"Pipeline complete - {totalTasks} total tasks dispatched to GPU");
-        }
-
-        /// <summary>
-        /// Gets statistics about the current processing context.
-        /// Useful for debugging and monitoring.
-        /// </summary>
-        public ProcessingStats GetStats(TerrainProcessingContext context)
-        {
-            var stats = new ProcessingStats
-            {
-                DirtyRegionCount = context.AllDirtyRegions?.Count ?? 0,
-                HeightLayerCount = context.DirtyHeightLayers?.Count ?? 0,
-                TextureLayerCount = context.DirtyTextureLayers?.Count ?? 0,
-                FeatureLayerCount = context.DirtyFeatureLayers?.Count ?? 0,
-                HeightMaskTaskCount = context.HeightLayerMaskTasks?.Count ?? 0,
-                HeightCompositeTaskCount = context.RegionHeightCompositeTasks?.Count ?? 0,
-                TextureMaskTaskCount = context.TextureLayerMaskTasks?.Count ?? 0,
-                TextureCompositeTaskCount = context.RegionTextureCompositeTasks?.Count ?? 0,
-                FeatureMaskTaskCount = context.FeatureLayerMaskTasks?.Count ?? 0
-            };
-
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
-                stats.ToString());
-
-            return stats;
         }
     }
 

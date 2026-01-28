@@ -2,6 +2,8 @@ using Godot;
 using System.Linq;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Core.Debug;
+using Terrain3DTools.Utils;
+
 
 namespace Terrain3DTools.Core
 {
@@ -11,7 +13,7 @@ namespace Terrain3DTools.Core
     public class LayerCollectionManager
     {
         private const string DEBUG_CLASS_NAME = "LayerCollectionManager";
-        
+
         private readonly Node _owner;
         private Godot.Collections.Array<TerrainLayerBase> _layers = new();
         private int _previousLayerCount = 0;
@@ -19,9 +21,9 @@ namespace Terrain3DTools.Core
         public LayerCollectionManager(Node owner)
         {
             _owner = owner;
-            
+
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization, 
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.Initialization,
                 "LayerCollectionManager initialized");
         }
 
@@ -46,7 +48,7 @@ namespace Terrain3DTools.Core
                 .ToArray();
 
             var newLayers = new Godot.Collections.Array<TerrainLayerBase>();
-            
+
             // Build new collection
             foreach (var layer in layerNodes)
             {
@@ -57,13 +59,17 @@ namespace Terrain3DTools.Core
             int addedCount = 0;
             int removedCount = 0;
 
-            // Check for new layers
+            // Check for new layers, prevent unique names from being duplicated when duplicating a node
             foreach (var layer in newLayers)
             {
                 if (!_layers.Contains(layer))
                 {
                     addedCount++;
-                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails, 
+
+                    // Check for duplicate names and auto-rename
+                    EnsureUniqueName(layer, newLayers);
+
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
                         $"New layer detected: '{layer.LayerName}' ({layer.GetLayerType()})");
                 }
             }
@@ -74,7 +80,7 @@ namespace Terrain3DTools.Core
                 if (!newLayers.Contains(layer))
                 {
                     removedCount++;
-                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails, 
+                    DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerDetails,
                         $"Layer removed: '{layer.LayerName}' ({layer.GetLayerType()})");
                 }
             }
@@ -86,7 +92,7 @@ namespace Terrain3DTools.Core
             // Log summary if there were changes
             if (addedCount > 0 || removedCount > 0)
             {
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerLifecycle, 
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.LayerLifecycle,
                     $"Layer collection updated - Added: {addedCount}, Removed: {removedCount}, Total: {_layers.Count}");
             }
 
@@ -99,6 +105,26 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
+        /// Ensures a layer has a unique name. If another layer already has the same name,
+        /// generates a new unique name. This prevents issues with duplicate layer names
+        /// that can occur when duplicating layers in the editor.
+        /// </summary>
+        private void EnsureUniqueName(TerrainLayerBase newLayer, Godot.Collections.Array<TerrainLayerBase> allLayers)
+        {
+            bool hasDuplicate = allLayers.Any(other =>
+                other != newLayer && other.LayerName == newLayer.LayerName);
+
+            if (hasDuplicate)
+            {
+                string oldName = newLayer.LayerName;
+                newLayer.LayerName = $"{newLayer.LayerTypeName()} {IdGenerator.GenerateShortUid()}";
+
+                DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
+                    $"Duplicate layer name detected. Renamed '{oldName}' to '{newLayer.LayerName}'");
+            }
+        }
+
+        /// <summary>
         /// Logs a breakdown of layers by type.
         /// </summary>
         private void LogLayerBreakdown()
@@ -107,7 +133,7 @@ namespace Terrain3DTools.Core
             var textureCount = _layers.Count(l => l.GetLayerType() == LayerType.Texture);
             var featureCount = _layers.Count(l => l.GetLayerType() == LayerType.Feature);
 
-            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics, 
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PerformanceMetrics,
                 $"Layer breakdown - Height: {heightCount}, Texture: {textureCount}, Feature: {featureCount}, Total: {_layers.Count}");
         }
 
