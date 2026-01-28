@@ -176,6 +176,9 @@ namespace Terrain3DTools.Pipeline
             FeatureLayer featureLayer,
             int maskWidth,
             int maskHeight,
+            Rid heightmapArray,
+            Rid metadataBuffer,
+            int regionCountInArray,
             List<AsyncGpuTask> dependencies,
             Action onCompleteCallback)
         {
@@ -184,12 +187,12 @@ namespace Terrain3DTools.Pipeline
             if (featureLayer is PathLayer pathLayer)
             {
                 return CreatePathLayerMaskTaskLazy(
-                    targetTexture, pathLayer, maskWidth, maskHeight, dependencies, onCompleteCallback);
+                    targetTexture, pathLayer, maskWidth, maskHeight, heightmapArray, metadataBuffer, regionCountInArray, dependencies, onCompleteCallback);
             }
             else if (featureLayer is InstancerLayer instancerLayer)
             {
                 return CreateInstancerLayerMaskTaskLazy(
-                    targetTexture, instancerLayer, maskWidth, maskHeight, dependencies, onCompleteCallback);
+                    targetTexture, instancerLayer, maskWidth, maskHeight, heightmapArray, metadataBuffer, regionCountInArray, dependencies, onCompleteCallback);
             }
             else
             {
@@ -211,6 +214,9 @@ namespace Terrain3DTools.Pipeline
             PathLayer pathLayer,
             int maskWidth,
             int maskHeight,
+            Rid heightmapArray,
+            Rid metadataBuffer,
+            int regionCountInArray,
             List<AsyncGpuTask> dependencies,
             Action onCompleteCallback)
         {
@@ -330,6 +336,9 @@ namespace Terrain3DTools.Pipeline
             InstancerLayer instancerLayer,
             int maskWidth,
             int maskHeight,
+            Rid heightmapArray,
+            Rid metadataBuffer,
+            int regionCountInArray,
             List<AsyncGpuTask> dependencies,
             Action onCompleteCallback)
         {
@@ -374,9 +383,39 @@ namespace Terrain3DTools.Pipeline
                     allShaderPaths.Add(clearShaderPath);
                 }
 
-                // 2. Fill with white (full density) as base - masks will subtract/modify
+                // 2. Stitching (if needed)
+                Rid localStitchedHeightmap = new Rid();
+                if (heightmapArray.IsValid &&
+                    regionCountInArray > 0 &&
+                    instancerLayer.layerHeightVisualizationTextureRID.IsValid &&
+                    instancerLayer.DoesAnyMaskRequireHeightData())
+                {
+                    localStitchedHeightmap = instancerLayer.layerHeightVisualizationTextureRID;
+
+                    var (scCmd, scRids, scShader) = GpuKernels.CreateClearCommands(
+                        localStitchedHeightmap, Colors.Black, maskWidth, maskHeight, DEBUG_CLASS_NAME);
+                    if (scCmd != null) { allGpuCommands.Add(scCmd); allTempRids.AddRange(scRids); allShaderPaths.Add(scShader); }
+
+                    var (stitchCmd, stitchRids, stitchShader) = GpuKernels.CreateStitchHeightmapCommands(
+                        localStitchedHeightmap,
+                        heightmapArray,
+                        metadataBuffer,
+                        maskWidth,
+                        maskHeight,
+                        regionCountInArray,
+                        DEBUG_CLASS_NAME);
+
+                    if (stitchCmd != null)
+                    {
+                        allShaderPaths.Add(stitchShader);
+                        allGpuCommands.Add(stitchCmd);
+                        allTempRids.AddRange(stitchRids);
+                    }
+                }
+
+                // 3. Fill with white (full density) as base - masks will subtract/modify
                 var (fillCmd, fillRids, fillShaderPath) = GpuKernels.CreateClearCommands(
-                    targetTexture, Colors.White, maskWidth, maskHeight, DEBUG_CLASS_NAME);
+                    targetTexture, Colors.Black, maskWidth, maskHeight, DEBUG_CLASS_NAME);
 
                 if (fillCmd != null)
                 {
@@ -385,13 +424,13 @@ namespace Terrain3DTools.Pipeline
                     allShaderPaths.Add(fillShaderPath);
                 }
 
-                // 3. Apply user masks (slope, noise, etc.) to create density map
+                // 4. Apply user masks (slope, noise, etc.) to create density map
                 foreach (var mask in instancerLayer.Masks)
                 {
                     if (mask != null)
                     {
                         var (maskCmd, maskRids, maskShaders) = mask.CreateApplyCommands(
-                            targetTexture, maskWidth, maskHeight, new Rid());
+                            targetTexture, maskWidth, maskHeight, localStitchedHeightmap);
 
                         if (maskCmd != null)
                         {
@@ -402,7 +441,7 @@ namespace Terrain3DTools.Pipeline
                     }
                 }
 
-                // 4. Apply falloff
+                // 5. Apply falloff
                 if (instancerLayer.FalloffApplyMode == FalloffApplication.ApplyToMask)
                 {
                     var (falloffCmd, falloffRids, falloffShaderPath) = GpuKernels.CreateFalloffCommands(

@@ -10,9 +10,9 @@ using Terrain3DTools.Utils;
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
-    /// Phase 8: Updates visualization for the currently selected layer.
+    /// Phase 11: Updates visualization for the currently selected layer.
     /// <para>
-    /// <b>Fix:</b> Strictly enforces cleanup order. 
+    /// Strictly enforces cleanup order. 
     /// UniformSets (Dependents) are freed before TextureArrays/Buffers (Owners).
     /// </para>
     /// </summary>
@@ -177,10 +177,10 @@ namespace Terrain3DTools.Pipeline
                     }
                 };
 
-                // CRITICAL FIX: Convert Operation RIDs to List FIRST
+                // Convert Operation RIDs to List FIRST
                 var finalCleanupList = operationRids.ToList();
 
-                // CRITICAL FIX: Add Owners LAST
+                // Add Owners LAST
                 if (heightmapArrayRid.IsValid) finalCleanupList.Add(heightmapArrayRid);
                 if (metadataBufferRid.IsValid) finalCleanupList.Add(metadataBufferRid);
 

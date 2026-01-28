@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Terrain3DTools.Layers;
@@ -10,7 +11,7 @@ namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 5: Generates mask textures for all dirty feature layers.
-    /// Refactored to use Lazy (JIT) initialization.
+    /// Refactored to use Lazy (JIT) initialization and HeightDataStager.
     /// </summary>
     public class FeatureLayerMaskPhase : IProcessingPhase
     {
@@ -38,9 +39,11 @@ namespace Terrain3DTools.Pipeline
                 var dependencies = new List<AsyncGpuTask>();
                 var overlappingRegionCoords = TerrainCoordinateHelper
                     .GetRegionBoundsForLayer(layer, context.RegionSize)
-                    .GetRegionCoords();
+                    .GetRegionCoords()
+                    .ToList();
 
-                if (featureLayer.ModifiesHeight)
+                // Add Height Dependencies if the feature modifies height OR reads height (via masks)
+                if (featureLayer.ModifiesHeight || featureLayer.DoesAnyMaskRequireHeightData())
                 {
                     var heightDependencies = overlappingRegionCoords
                         .Where(rc => context.RegionHeightCompositeTasks.ContainsKey(rc))
@@ -64,12 +67,11 @@ namespace Terrain3DTools.Pipeline
                         layer.Visualizer?.Update();
                 };
 
-                // Call the Pipeline (which returns a Lazy task)
-                var maskTask = LayerMaskPipeline.CreateUpdateFeatureLayerTextureTask(
-                    layer.layerTextureRID,
+                // Create the task using the lazy helper
+                var maskTask = CreateFeatureMaskTaskLazy(
                     featureLayer,
-                    layer.Size.X,
-                    layer.Size.Y,
+                    context.RegionMapManager,
+                    context.RegionSize,
                     dependencies,
                     onComplete);
 
@@ -79,10 +81,110 @@ namespace Terrain3DTools.Pipeline
                     tasks[layer] = maskTask;
                     AsyncGpuTaskManager.Instance.AddTask(maskTask);
                     DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                        $"Feature layer mask task added to AsynceGpuTaskManager on Frame : {Engine.GetProcessFrames}");
+                        $"Feature layer mask task added to AsynceGpuTaskManager on Frame : {Engine.GetProcessFrames()}");
                 }
             }
             return tasks;
+        }
+
+        private AsyncGpuTask CreateFeatureMaskTaskLazy(
+            FeatureLayer layer,
+            RegionMapManager regionMapManager,
+            int regionSize,
+            List<AsyncGpuTask> dependencies,
+            Action onComplete)
+        {
+            string layerName = layer.LayerName;
+            int width = layer.Size.X;
+            int height = layer.Size.Y;
+
+            Func<(Action<long>, List<Rid>, List<string>)> generator = () =>
+            {
+                if (!GodotObject.IsInstanceValid(layer)) return ((l) => { }, new List<Rid>(), new List<string>());
+
+                var allCommands = new List<Action<long>>();
+                
+                // 1. Operation RIDs (UniformSets, Temp Buffers)
+                var operationRids = new HashSet<Rid>();
+                var allShaderPaths = new List<string>();
+
+                // 2. Owner RIDs (Must be freed LAST)
+                Rid heightmapArrayRid = new Rid();
+                Rid metadataBufferRid = new Rid();
+                int stagedRegionCount = 0;
+
+                // --- STAGING ---
+                if (layer.DoesAnyMaskRequireHeightData())
+                {
+                    var (stagingTask, stagingResult) = HeightDataStager.StageHeightDataForLayerAsync(
+                        layer, regionMapManager, regionSize, null);
+
+                    if (stagingTask != null && stagingResult.IsValid)
+                    {
+                        allCommands.Add(stagingTask.GpuCommands);
+                        
+                        var (stagedRids, stagedPaths) = stagingTask.ExtractResourcesForCleanup();
+                        foreach (var rid in stagedRids) operationRids.Add(rid);
+                        allShaderPaths.AddRange(stagedPaths);
+                        
+                        heightmapArrayRid = stagingResult.HeightmapArrayRid;
+                        metadataBufferRid = stagingResult.MetadataBufferRid;
+                        stagedRegionCount = stagingResult.ActiveRegionCount;
+                    }
+                }
+
+                // --- PIPELINE ---
+                var pipelineTask = LayerMaskPipeline.CreateUpdateFeatureLayerTextureTask(
+                    layer.layerTextureRID,
+                    layer,
+                    width,
+                    height,
+                    heightmapArrayRid,
+                    metadataBufferRid,
+                    stagedRegionCount,
+                    null, 
+                    null  
+                );
+
+                if (pipelineTask != null)
+                {
+                    pipelineTask.Prepare(); 
+                    if (pipelineTask.GpuCommands != null)
+                    {
+                        allCommands.Add(pipelineTask.GpuCommands);
+                        
+                        var (pipeRids, pipePaths) = pipelineTask.ExtractResourcesForCleanup();
+                        foreach (var rid in pipeRids) operationRids.Add(rid);
+                        allShaderPaths.AddRange(pipePaths);
+                    }
+                }
+
+                // --- ASSEMBLY & ORDERING ---
+                Action<long> combined = (computeList) =>
+                {
+                    for (int i = 0; i < allCommands.Count; i++)
+                    {
+                        allCommands[i]?.Invoke(computeList);
+                        if (i < allCommands.Count - 1) Gpu.Rd.ComputeListAddBarrier(computeList);
+                    }
+                };
+
+                var finalCleanupList = operationRids.ToList();
+
+                // Add Owners LAST to guarantee destruction order
+                if (heightmapArrayRid.IsValid) finalCleanupList.Add(heightmapArrayRid);
+                if (metadataBufferRid.IsValid) finalCleanupList.Add(metadataBufferRid);
+
+                return (combined, finalCleanupList, allShaderPaths);
+            };
+
+            var owners = new List<object> { layer };
+            return new AsyncGpuTask(
+                generator,
+                onComplete,
+                owners,
+                $"Feature Mask: {layerName} (Lazy)",
+                dependencies);
         }
     }
 }

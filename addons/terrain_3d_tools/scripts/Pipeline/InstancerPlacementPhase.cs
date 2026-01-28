@@ -13,7 +13,7 @@ using Terrain3DTools.Settings;
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
-    /// Phase 9: Generates instance transforms for all instancer layers.
+    /// Phase 10: Generates instance transforms for all instancer layers.
     /// Runs after exclusion maps are written by other feature layers.
     /// Uses a single compute dispatch per layer/region with mesh selection in shader.
     /// </summary>
@@ -177,8 +177,6 @@ namespace Terrain3DTools.Pipeline
                 dependencies);
         }
 
-        // /Pipeline/InstancerPlacementPhase.cs
-        // Update CreatePlacementCommands to add a barrier
 
         private (Action<long>, List<Rid>, List<string>) CreatePlacementCommands(
             InstanceBuffer instanceBuffer,
@@ -190,6 +188,31 @@ namespace Terrain3DTools.Pipeline
             float worldHeightScale,
             int maxInstances)
         {
+            // State and weight diagnostics
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                $"=== MESH ENTRY DEBUG ===");
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                $"Total entries: {state.MeshEntries.Count}, TotalWeight: {state.TotalProbabilityWeight}");
+
+            float cumulative = 0f;
+            for (int i = 0; i < state.MeshEntries.Count; i++)
+            {
+                var entry = state.MeshEntries[i];
+                cumulative += entry.ProbabilityWeight / state.TotalProbabilityWeight;
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                    $"  [{i}] MeshAssetId={entry.MeshAssetId}, Weight={entry.ProbabilityWeight}, Cumulative={cumulative:F4}");
+            }
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
+                $"=== END MESH ENTRY DEBUG ===");
+
+            if (!state.DensityMaskRid.IsValid || !heightMap.IsValid || state.MeshEntries.Count == 0)
+            {
+                DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
+                    $"Invalid resources for placement: mask={state.DensityMaskRid.IsValid}, height={heightMap.IsValid}, meshes={state.MeshEntries.Count}");
+                return ((l) => { }, new List<Rid>(), new List<string>());
+            }
+            // End of initial diagnostics
+
             if (!state.DensityMaskRid.IsValid || !heightMap.IsValid || state.MeshEntries.Count == 0)
             {
                 DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
