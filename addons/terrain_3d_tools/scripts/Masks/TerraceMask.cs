@@ -12,7 +12,6 @@ namespace Terrain3DTools.Masks
     [GlobalClass, Tool]
     public partial class TerraceMask : TerrainMask
     {
-        // ... (Properties and fields remain the same) ...
         #region Private Fields
         private TerraceMaskMode _mode = TerraceMaskMode.OutputTerracedHeight;
         private int _terraceCount = 10;
@@ -123,7 +122,6 @@ namespace Terrain3DTools.Masks
 
             return (operation.CreateDispatchCommands(groupsX, groupsY), operation.GetTemporaryRids(), new List<string> { shaderPath });
         }
-        // --- END OF CORRECTION ---
 
         private byte[] BuildPushConstants()
         {
