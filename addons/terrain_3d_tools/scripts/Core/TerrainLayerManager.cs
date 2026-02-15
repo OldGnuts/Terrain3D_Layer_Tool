@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using Terrain3DTools.Core.Debug;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Layers.Instancer;
+using Terrain3DTools.Brushes;
 using Terrain3DTools.Utils;
 using Terrain3DTools.Settings;
 using System.Linq;
@@ -59,10 +60,23 @@ namespace Terrain3DTools.Core
         private Dictionary<ulong, HashSet<Vector2I>> _previousInstanceRegions = new();
         private Dictionary<ulong, HashSet<int>> _previousMeshIdsByLayer = new();
         private bool _fullyInitialized = false;
+        private TerrainBrushManager _brushManager;
 
         // Debug
         private const string DEBUG_CLASS = "TerrainLayerManager";
         private DebugManager _debugManager;
+        #endregion
+
+        #region Cached Collections for Hot Path
+        private readonly HashSet<TerrainLayerBase> _maskDirtyLayersCache = new();
+        private readonly HashSet<TerrainLayerBase> _positionDirtyLayersCache = new();
+        private readonly HashSet<Vector2I> _affectedRegionsCache = new();
+        private readonly HashSet<Vector2I> _featureAffectedRegionsCache = new();
+        private readonly HashSet<Vector2I> _instancerAffectedRegionsCache = new();
+        private readonly HashSet<Vector2I> _regionsToProcessCache = new();
+        private readonly List<TerrainLayerBase> _dirtyHeightLayersCache = new();
+        private readonly List<TerrainLayerBase> _dirtyTextureLayersCache = new();
+        private readonly List<TerrainLayerBase> _dirtyFeatureLayersCache = new();
         #endregion
 
         #region Properties
@@ -209,6 +223,9 @@ namespace Terrain3DTools.Core
             // Update region previews
             _regionMapManager?.SetPreviewsEnabled(settings.EnableRegionPreviews);
 
+            // Update brush manager height scale
+            _brushManager?.SetHeightScale(settings.WorldHeightScale);
+
             // Propagate world height scale to feature layers
             PropagateWorldHeightScaleToFeatureLayers();
 
@@ -301,6 +318,15 @@ namespace Terrain3DTools.Core
                 Terrain3DRegionSize,
                 settings?.WorldHeightScale ?? 128f);
 
+            if (_brushManager != null)
+            {
+                _brushManager.InitializeFastPath(
+                    _regionMapManager,
+                    _terrain3DIntegration,
+                    Terrain3DRegionSize,
+                    settings?.WorldHeightScale ?? 128f);
+            }
+
             if (_terrain3DIntegration.ValidateTerrainSystem())
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.Initialization,
@@ -320,6 +346,25 @@ namespace Terrain3DTools.Core
             }
 
             DebugManager.Instance?.EndTimer(DEBUG_CLASS, DebugCategory.Initialization, "InitializeSubManagers");
+        }
+
+        /// <summary>
+        /// Sets the brush manager reference for fast path initialization.
+        /// </summary>
+        public void SetBrushManager(TerrainBrushManager brushManager)
+        {
+            _brushManager = brushManager;
+
+            // Initialize fast path if sub-managers are already ready
+            if (_terrain3DIntegration != null && _regionMapManager != null)
+            {
+                var settings = GlobalToolSettingsManager.Current;
+                _brushManager.InitializeFastPath(
+                    _regionMapManager,
+                    _terrain3DIntegration,
+                    Terrain3DRegionSize,
+                    settings?.WorldHeightScale ?? 128f);
+            }
         }
 
         private void SetFullyInitialized()
@@ -413,24 +458,32 @@ namespace Terrain3DTools.Core
             _layerCollectionManager.Update();
             var allLayers = _layerCollectionManager.Layers;
 
-            var maskDirtyLayers = allLayers
-                .Where(l => GodotObject.IsInstanceValid(l) && l.IsDirty)
-                .ToHashSet();
+            // Clear cached collections
+            _maskDirtyLayersCache.Clear();
+            _positionDirtyLayersCache.Clear();
 
-            var positionDirtyLayers = allLayers
-                .Where(l => GodotObject.IsInstanceValid(l) && l.PositionDirty)
-                .ToHashSet();
+            // Collect dirty layers without LINQ allocation
+            foreach (var layer in allLayers)
+            {
+                if (!GodotObject.IsInstanceValid(layer)) continue;
 
-            if (positionDirtyLayers.Count > 0)
+                if (layer.IsDirty)
+                    _maskDirtyLayersCache.Add(layer);
+
+                if (layer.PositionDirty)
+                    _positionDirtyLayersCache.Add(layer);
+            }
+
+            if (_positionDirtyLayersCache.Count > 0)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
-                    $"Position-dirty layers: {string.Join(", ", positionDirtyLayers.Select(l => l.LayerName))}");
+                    $"Position-dirty layers: {string.Join(", ", _positionDirtyLayersCache.Select(l => l.LayerName))}");
             }
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
-                $"Layers: Total={allLayers.Count}, MaskDirty={maskDirtyLayers.Count}, PositionDirty={positionDirtyLayers.Count}");
+                $"Layers: Total={allLayers.Count}, MaskDirty={_maskDirtyLayersCache.Count}, PositionDirty={_positionDirtyLayersCache.Count}");
 
-            foreach (var layer in positionDirtyLayers)
+            foreach (var layer in _positionDirtyLayersCache)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.LayerDetails,
                     $"Position dirty: '{layer.LayerName}' at {layer.GlobalPosition}");
@@ -449,8 +502,8 @@ namespace Terrain3DTools.Core
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionLifecycle,
                 $"Managed: {_regionMapManager.GetManagedRegionCoords().Count}, BoundaryDirty: {boundaryDirtyRegions.Count}, ToRemove: {regionsToRemove.Count}");
 
-            bool hasChanges = maskDirtyLayers.Count > 0 ||
-                             positionDirtyLayers.Count > 0 ||
+            bool hasChanges = _maskDirtyLayersCache.Count > 0 ||
+                             _positionDirtyLayersCache.Count > 0 ||
                              boundaryDirtyRegions.Count > 0 ||
                              regionsToRemove.Count > 0;
 
@@ -459,84 +512,115 @@ namespace Terrain3DTools.Core
             _updateScheduler.SignalChanges();
 
             LayerDependencyManager.PropagateDirtyStateFromMovement(
-                positionDirtyLayers,
+                _positionDirtyLayersCache,
                 allLayers,
-                maskDirtyLayers);
+                _maskDirtyLayersCache);
 
             var propagatedDirtyLayers = LayerDependencyManager.PropagateDirtyState(allLayers);
-            maskDirtyLayers.UnionWith(propagatedDirtyLayers);
+            _maskDirtyLayersCache.UnionWith(propagatedDirtyLayers);
 
             LayerDependencyManager.PropagateInstancerDirtyState(
                 allLayers,
-                maskDirtyLayers,
+                _maskDirtyLayersCache,
                 _previousInstanceRegions,
                 Terrain3DRegionSize);
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.LayerDirtying,
-                $"After propagation: {maskDirtyLayers.Count} mask dirty layers");
+                $"After propagation: {_maskDirtyLayersCache.Count} mask dirty layers");
 
-            var affectedRegions = new HashSet<Vector2I>(boundaryDirtyRegions);
-            var featureAffectedRegions = new HashSet<Vector2I>();
-            var instancerAffectedRegions = new HashSet<Vector2I>();
+            // Clear and reuse affected regions collections
+            _affectedRegionsCache.Clear();
+            _affectedRegionsCache.UnionWith(boundaryDirtyRegions);
+            _featureAffectedRegionsCache.Clear();
+            _instancerAffectedRegionsCache.Clear();
 
-            foreach (var layer in maskDirtyLayers.Union(positionDirtyLayers))
+            foreach (var layer in _maskDirtyLayersCache)
             {
                 var bounds = TerrainCoordinateHelper.GetRegionBoundsForLayer(layer, Terrain3DRegionSize);
                 foreach (var coord in bounds.GetRegionCoords())
                 {
-                    affectedRegions.Add(coord);
+                    _affectedRegionsCache.Add(coord);
                     if (layer.GetLayerType() == LayerType.Feature)
                     {
-                        featureAffectedRegions.Add(coord);
+                        _featureAffectedRegionsCache.Add(coord);
                     }
                     if (layer is InstancerLayer)
                     {
-                        instancerAffectedRegions.Add(coord);
+                        _instancerAffectedRegionsCache.Add(coord);
+                    }
+                }
+            }
+
+            foreach (var layer in _positionDirtyLayersCache)
+            {
+                var bounds = TerrainCoordinateHelper.GetRegionBoundsForLayer(layer, Terrain3DRegionSize);
+                foreach (var coord in bounds.GetRegionCoords())
+                {
+                    _affectedRegionsCache.Add(coord);
+                    if (layer.GetLayerType() == LayerType.Feature)
+                    {
+                        _featureAffectedRegionsCache.Add(coord);
+                    }
+                    if (layer is InstancerLayer)
+                    {
+                        _instancerAffectedRegionsCache.Add(coord);
                     }
                 }
             }
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionDependencies,
-                $"Affected: {affectedRegions.Count}, FeatureAffected: {featureAffectedRegions.Count}");
+                $"Affected: {_affectedRegionsCache.Count}, FeatureAffected: {_featureAffectedRegionsCache.Count}");
 
-            var regionsToProcess = affectedRegions
-                .Where(coord =>
+            // Filter to processable regions without LINQ allocation
+            _regionsToProcessCache.Clear();
+            foreach (var coord in _affectedRegionsCache)
+            {
+                var tiered = _regionDependencyManager.GetTieredLayersForRegion(coord);
+                if (tiered?.ShouldProcess() ?? false)
                 {
-                    var tiered = _regionDependencyManager.GetTieredLayersForRegion(coord);
-                    return tiered?.ShouldProcess() ?? false;
-                })
-                .ToHashSet();
+                    _regionsToProcessCache.Add(coord);
+                }
+            }
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.RegionDependencies,
-                $"Affected: {affectedRegions.Count} → Processing: {regionsToProcess.Count}");
+                $"Affected: {_affectedRegionsCache.Count} → Processing: {_regionsToProcessCache.Count}");
 
-            bool anyHeightLayerSizeChanged = maskDirtyLayers
-                .Where(l => l.GetLayerType() == LayerType.Height)
-                .Any(l => l.SizeHasChanged());
+            // Check for height layer size changes without LINQ allocation
+            bool anyHeightLayerSizeChanged = false;
+            foreach (var layer in _maskDirtyLayersCache)
+            {
+                if (layer.GetLayerType() == LayerType.Height && layer.SizeHasChanged())
+                {
+                    anyHeightLayerSizeChanged = true;
+                    break;
+                }
+            }
 
             bool isCurrentlyInteractive = _updateScheduler.IsCurrentUpdateInteractive();
             bool isInteractiveResize = isCurrentlyInteractive && anyHeightLayerSizeChanged;
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                 $"Phase 4 - IsCurrentlyInteractive: {isCurrentlyInteractive}, " +
-                $"AnyHeightLayerSizeChanged: {anyHeightLayerSizeChanged}, " +
-                $"IsInteractiveResize: {isInteractiveResize}");
+                      $"AnyHeightLayerSizeChanged: {anyHeightLayerSizeChanged}, " +
+                      $"IsInteractiveResize: {isInteractiveResize}");
 
             if (isInteractiveResize)
             {
-                foreach (var layer in maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Height && l.SizeHasChanged()))
+                foreach (var layer in _maskDirtyLayersCache)
                 {
-                    _updateScheduler.MarkLayerForReDirty(layer);
-                    DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
-                        $"Marked '{layer.LayerName}' for re-dirty after interaction ends");
+                    if (layer.GetLayerType() == LayerType.Height && layer.SizeHasChanged())
+                    {
+                        _updateScheduler.MarkLayerForReDirty(layer);
+                        DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
+                            $"Marked '{layer.LayerName}' for re-dirty after interaction ends");
+                    }
                 }
             }
 
-            // Read world height scale from settings for feature layers
             var settings = GlobalToolSettingsManager.Current;
             float worldHeightScale = settings?.WorldHeightScale ?? 128f;
 
-            foreach (var layer in maskDirtyLayers)
+            foreach (var layer in _maskDirtyLayersCache)
             {
                 layer.PrepareMaskResources(isInteractiveResize);
                 if (layer is FeatureLayer featureLayer)
@@ -545,42 +629,63 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            var dirtyHeightLayers = maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Height);
-            var dirtyTextureLayers = maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Texture);
-            var dirtyFeatureLayers = maskDirtyLayers.Where(l => l.GetLayerType() == LayerType.Feature);
+            // Build typed layer lists without LINQ allocation
+            _dirtyHeightLayersCache.Clear();
+            _dirtyTextureLayersCache.Clear();
+            _dirtyFeatureLayersCache.Clear();
+
+            foreach (var layer in _maskDirtyLayersCache)
+            {
+                switch (layer.GetLayerType())
+                {
+                    case LayerType.Height:
+                        _dirtyHeightLayersCache.Add(layer);
+                        break;
+                    case LayerType.Texture:
+                        _dirtyTextureLayersCache.Add(layer);
+                        break;
+                    case LayerType.Feature:
+                        _dirtyFeatureLayersCache.Add(layer);
+                        break;
+                }
+            }
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.PhaseExecution,
-                $"GPU work: Height={dirtyHeightLayers.Count()}, Texture={dirtyTextureLayers.Count()}, Feature={dirtyFeatureLayers.Count()}");
+                $"GPU work: Height={_dirtyHeightLayersCache.Count}, Texture={_dirtyTextureLayersCache.Count}, Feature={_dirtyFeatureLayersCache.Count}");
 
             _updateProcessor.ProcessUpdatesAsync(
-                regionsToProcess,
-                dirtyHeightLayers,
-                dirtyTextureLayers,
-                dirtyFeatureLayers,
+                _regionsToProcessCache,
+                _dirtyHeightLayersCache,
+                _dirtyTextureLayersCache,
+                _dirtyFeatureLayersCache,
                 _regionDependencyManager.GetActiveRegionCoords(),
                 isInteractiveResize,
                 _selectedLayer
             );
 
-            _regionsProcessedThisUpdate = regionsToProcess;
+            _regionsProcessedThisUpdate = new HashSet<Vector2I>(_regionsToProcessCache);
             _regionsToRemoveAfterPush = regionsToRemove;
             _currentPhase = UpdatePhase.Processing;
 
-            var instancerLayers = allLayers
-                .OfType<InstancerLayer>()
-                .Where(l => GodotObject.IsInstanceValid(l) && l.IsDirty)
-                .ToList();
-
-            _hasInstancersThisUpdate = instancerLayers.Count > 0;
+            // Check for instancer layers without LINQ allocation
+            _hasInstancersThisUpdate = false;
+            foreach (var layer in allLayers)
+            {
+                if (layer is InstancerLayer il && GodotObject.IsInstanceValid(il) && il.IsDirty)
+                {
+                    _hasInstancersThisUpdate = true;
+                    break;
+                }
+            }
 
             if (_hasInstancersThisUpdate)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
-                    $"Update includes {instancerLayers.Count} instancer layer(s)");
+                    "Update includes instancer layer(s)");
             }
 
-            foreach (var layer in positionDirtyLayers) layer.ClearPositionDirty();
-            foreach (var layer in maskDirtyLayers) layer.ClearDirty();
+            foreach (var layer in _positionDirtyLayersCache) layer.ClearPositionDirty();
+            foreach (var layer in _maskDirtyLayersCache) layer.ClearDirty();
 
             DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
                 "GPU work submitted");
@@ -591,6 +696,14 @@ namespace Terrain3DTools.Core
 
         private void ProcessIdlePhase(GlobalToolSettings settings)
         {
+            // Skip normal processing if brush stroke is active
+            if (TerrainBrushManager.IsAnyStrokeActive)
+            {
+                DebugManager.Instance?.Log(DEBUG_CLASS, DebugCategory.UpdateCycle,
+                    "Skipping pipeline - brush stroke active");
+                return;
+            }
+
             if (_updateScheduler.ShouldProcessUpdate() &&
                 (_terrain3DIntegration == null || !_terrain3DIntegration.HasPendingPushes))
             {
@@ -1155,6 +1268,7 @@ namespace Terrain3DTools.Core
 
             _regionMapManager?.FreeAll();
             _scenePreviewManager?.Cleanup();
+            _brushManager?.Cleanup();
             _updateScheduler?.Reset();
             _terrain3DConnector?.Disconnect();
         }

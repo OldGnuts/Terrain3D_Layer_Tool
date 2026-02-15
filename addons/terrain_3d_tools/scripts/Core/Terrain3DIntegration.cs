@@ -1,3 +1,5 @@
+// /Core/Terrain3DIntegration.cs
+
 using Godot;
 using System.Collections.Generic;
 using System.Linq;
@@ -56,6 +58,10 @@ namespace Terrain3DTools.Core
 
             _isPushing = true;
 
+            // Sync here, right before readback
+            // This ensures all pending GPU work is complete
+            AsyncGpuTaskManager.Instance?.SyncIfNeeded();
+
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
                 $"Starting synchronous push: {updatedRegions.Count} regions, on frame {Engine.GetProcessFrames()}");
 
@@ -81,6 +87,7 @@ namespace Terrain3DTools.Core
 
         /// <summary>
         /// Synchronously reads region data from GPU and pushes to Terrain3D.
+        /// Ensures GPU work is complete before reading.
         /// </summary>
         private bool PushRegionSync(Vector2I regionCoord)
         {
@@ -114,7 +121,9 @@ namespace Terrain3DTools.Core
 
                 DispatchHeightScale(regionData.HeightMap, scaledHeightRid);
 
-                Gpu.Sync();
+                // Sync here, right before readback
+                // This ensures all pending GPU work is complete
+                AsyncGpuTaskManager.Instance?.SyncIfNeeded();
 
                 byte[] heightData = Gpu.Rd.TextureGetData(scaledHeightRid, 0);
                 if (heightData == null || heightData.Length == 0)
@@ -191,6 +200,7 @@ namespace Terrain3DTools.Core
             commands?.Invoke(computeList);
             Gpu.ComputeListEnd();
             Gpu.Submit();
+            AsyncGpuTaskManager.Instance?.MarkPendingSubmission();
 
             foreach (var rid in op.GetTemporaryRids())
             {
@@ -446,6 +456,188 @@ namespace Terrain3DTools.Core
                 $"Instance push complete: cleared {clearedCount} region/mesh pairs, " +
                 $"added {totalInstancesAdded} instances across {meshIdList.Count} mesh type(s)");
         }
+
+        #region Fast Path Push
+
+        /// <summary>
+        /// Fast path push for height data during brush strokes.
+        /// </summary>
+        public bool PushRegionHeightFast(Vector2I regionCoords, float heightScale)
+        {
+            var regionData = _regionMapManager.GetRegionData(regionCoords);
+            if (regionData == null || !regionData.HeightMap.IsValid)
+            {
+                return false;
+            }
+
+            Rid scaledHeightRid = new();
+
+            try
+            {
+                scaledHeightRid = Gpu.CreateTexture2D(
+                    (uint)_regionSize, (uint)_regionSize,
+                    RenderingDevice.DataFormat.R32Sfloat,
+                    RenderingDevice.TextureUsageBits.StorageBit |
+                    RenderingDevice.TextureUsageBits.CanCopyFromBit);
+
+                if (!scaledHeightRid.IsValid)
+                    return false;
+
+                // Dispatch returns false if shader failed - don't sync if nothing was submitted
+                if (!DispatchHeightScaleFast(regionData.HeightMap, scaledHeightRid, heightScale))
+                {
+                    return false;
+                }
+
+                // Use managed sync - only syncs if there's pending work
+                AsyncGpuTaskManager.Instance?.SyncIfNeeded();
+
+                byte[] heightData = Gpu.Rd.TextureGetData(scaledHeightRid, 0);
+                if (heightData == null || heightData.Length == 0)
+                    return false;
+
+                var heightImage = Image.CreateFromData(
+                    _regionSize, _regionSize, false, Image.Format.Rf, heightData);
+
+                PushHeightImageToTerrain3D(regionCoords, heightImage);
+
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Fast height push failed for {regionCoords}: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (scaledHeightRid.IsValid)
+                {
+                    Gpu.FreeRid(scaledHeightRid);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Fast path push for control/texture data during brush strokes.
+        /// Assumes GPU work is already synced.
+        /// </summary>
+        public bool PushRegionControlFast(Vector2I regionCoords)
+        {
+            var regionData = _regionMapManager.GetRegionData(regionCoords);
+            if (regionData == null || !regionData.ControlMap.IsValid)
+            {
+                return false;
+            }
+
+            try
+            {
+                byte[] controlData = Gpu.Rd.TextureGetData(regionData.ControlMap, 0);
+                if (controlData == null || controlData.Length == 0)
+                    return false;
+
+                var controlImage = Image.CreateFromData(
+                    _regionSize, _regionSize, false, Image.Format.Rf, controlData);
+
+                PushControlImageToTerrain3D(regionCoords, controlImage);
+
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Fast control push failed for {regionCoords}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Fast path push for height data during brush strokes.
+        /// </summary>
+        private bool DispatchHeightScaleFast(Rid sourceHeightMap, Rid destHeightMap, float heightScale)
+        {
+            var op = new AsyncComputeOperation("res://addons/terrain_3d_tools/Shaders/Utils/height_scale.glsl");
+
+            if (!op.IsValid())
+            {
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    "Failed to create height scale compute operation");
+                return false;
+            }
+
+            op.BindStorageImage(0, sourceHeightMap);
+            op.BindStorageImage(1, destHeightMap);
+
+            var pushConstants = GpuUtils.CreatePushConstants()
+                .Add(heightScale)
+                .AddPadding(12)
+                .Build();
+            op.SetPushConstants(pushConstants);
+
+            uint groups = (uint)((_regionSize + 7) / 8);
+
+            long computeList = Gpu.ComputeListBegin();
+            op.CreateDispatchCommands(groups, groups)?.Invoke(computeList);
+            Gpu.ComputeListEnd();
+            Gpu.Submit();
+            AsyncGpuTaskManager.Instance?.MarkPendingSubmission();
+
+            // Cleanup temp RIDs immediately
+            foreach (var rid in op.GetTemporaryRids())
+            {
+                Gpu.FreeRid(rid);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Push just height image to Terrain3D (no control map).
+        /// </summary>
+        private void PushHeightImageToTerrain3D(Vector2I regionCoords, Image heightImage)
+        {
+            var t3DData = _terrain3D.Data;
+
+            if (!t3DData.HasRegion(regionCoords))
+            {
+                t3DData.AddRegionBlank(regionCoords, false);
+            }
+
+            var t3DRegion = t3DData.GetRegion(regionCoords);
+            if (t3DRegion == null)
+                return;
+
+            t3DRegion.SetMap(Terrain3DRegion.MapType.Height, heightImage);
+            t3DRegion.Edited = true;
+
+            // Immediate update for height only
+            t3DData.UpdateMaps(Terrain3DRegion.MapType.Height, false);
+        }
+
+        /// <summary>
+        /// Push just control image to Terrain3D (no height map).
+        /// </summary>
+        private void PushControlImageToTerrain3D(Vector2I regionCoords, Image controlImage)
+        {
+            var t3DData = _terrain3D.Data;
+
+            if (!t3DData.HasRegion(regionCoords))
+            {
+                t3DData.AddRegionBlank(regionCoords, false);
+            }
+
+            var t3DRegion = t3DData.GetRegion(regionCoords);
+            if (t3DRegion == null)
+                return;
+
+            t3DRegion.SetMap(Terrain3DRegion.MapType.Control, controlImage);
+            t3DRegion.Edited = true;
+
+            // Immediate update for control only
+            t3DData.UpdateMaps(Terrain3DRegion.MapType.Control, false);
+        }
+
+        #endregion
 
         #region Helpers
 
