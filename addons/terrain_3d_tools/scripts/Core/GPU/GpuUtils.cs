@@ -135,6 +135,58 @@ namespace Terrain3DTools.Core
             return uints;
         }
 
+        /// <summary>
+        /// Converts a byte array to a float array.
+        /// </summary>
+        public static float[] BytesToFloatArray(byte[] bytes)
+        {
+            if (bytes == null) return Array.Empty<float>();
+            if (bytes.Length % sizeof(float) != 0)
+            {
+                GD.PrintErr("[GpuUtils] Byte array length is not a multiple of 4. Cannot convert to float array.");
+                return Array.Empty<float>();
+            }
+            var floats = new float[bytes.Length / sizeof(float)];
+            Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
+            return floats;
+        }
+
+        /// <summary>
+        /// Converts a uint array to a byte array.
+        /// </summary>
+        public static byte[] UIntArrayToBytes(uint[] data)
+        {
+            if (data == null || data.Length == 0) return Array.Empty<byte>();
+            var bytes = new byte[data.Length * sizeof(uint)];
+            Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+            return bytes;
+        }
+
+        /// <summary>
+        /// Creates a byte array suitable for initializing a texture with a constant float value.
+        /// Useful for creating zeroed or filled textures at creation time without TextureUpdate.
+        /// </summary>
+        /// <param name="pixelCount">Number of pixels (width * height)</param>
+        /// <param name="value">The float value to fill with</param>
+        /// <returns>Byte array ready for texture creation</returns>
+        public static byte[] CreateFilledFloatBuffer(int pixelCount, float value = 0f)
+        {
+            byte[] data = new byte[pixelCount * sizeof(float)];
+
+            // Optimization: zero is already the default, no need to fill
+            if (value == 0f)
+            {
+                return data;
+            }
+
+            byte[] floatBytes = BitConverter.GetBytes(value);
+            for (int i = 0; i < pixelCount; i++)
+            {
+                Buffer.BlockCopy(floatBytes, 0, data, i * sizeof(float), sizeof(float));
+            }
+            return data;
+        }
+
         public static byte[] StructArrayToBytes<T>(T[] data) where T : struct
         {
             int structSize = Marshal.SizeOf(typeof(T));

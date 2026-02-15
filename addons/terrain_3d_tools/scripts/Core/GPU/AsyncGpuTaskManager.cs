@@ -1,6 +1,7 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Terrain3DTools.Core.Debug;
 
 namespace Terrain3DTools.Core
@@ -10,9 +11,10 @@ namespace Terrain3DTools.Core
     /// <para>
     /// <b>Key Features:</b>
     /// <br/>- Dependency resolution (DAG execution)
+    /// <br/>- Parallel task grouping based on resource conflicts
     /// <br/>- Batch submission to RenderingDevice
-    /// <br/>- <b>Resource Graveyard:</b> Handles deferred cleanup of GPU resources to prevent "Invalid ID" crashes.
-    /// <br/>- <b>Throttled Sync:</b> Manages RenderingDevice synchronization to prevent "Device already submitted" errors.
+    /// <br/>- Resource Graveyard for deferred cleanup of GPU resources
+    /// <br/>- Throttled sync to prevent "Device already submitted" errors
     /// </para>
     /// </summary>
     public partial class AsyncGpuTaskManager : Node
@@ -24,10 +26,45 @@ namespace Terrain3DTools.Core
         private readonly Queue<AsyncGpuTask> _readyQueue = new();
         private readonly List<AsyncGpuTask> _inFlightTasks = new();
 
+        /// <summary>
+        /// Tracks whether we have submitted work that hasn't been synced yet.
+        /// </summary>
+        private bool _hasPendingGpuWork = false;
         private int _pendingTaskCount = 0;
         private const int MAX_DISPATCHES_PER_FRAME = 128;
 
-        #region Resource Graveyard Data
+        #region Public API
+
+        /// <summary>
+        /// Returns true if there is GPU work that has been submitted but not yet synced.
+        /// </summary>
+        public bool HasPendingGpuSubmission => _hasPendingGpuWork;
+
+        /// <summary>
+        /// Syncs with the GPU only if there is pending work.
+        /// Call this before any GPU readback operation.
+        /// </summary>
+        public void SyncIfNeeded()
+        {
+            if (_hasPendingGpuWork)
+            {
+                Gpu.Sync();
+                _hasPendingGpuWork = false;
+            }
+        }
+
+        /// <summary>
+        /// Marks that a GPU submission has occurred outside of the task manager.
+        /// Call this after any direct Gpu.Submit() call.
+        /// </summary>
+        public void MarkPendingSubmission()
+        {
+            _hasPendingGpuWork = true;
+        }
+
+        #endregion
+
+        #region Resource Graveyard
         private struct StaleResource
         {
             public Rid Rid;
@@ -45,9 +82,9 @@ namespace Terrain3DTools.Core
 
         /// <summary>
         /// Number of frames to wait before freeing a GPU resource.
-        /// Default is 3 (Double buffering + 1 safety frame).
+        /// Default is 5 for deferred sync safety (submit → process → complete → buffer → safe).
         /// </summary>
-        public int CleanupFrameThreshold { get; set; } = 3;
+        public int CleanupFrameThreshold { get; set; } = 5;
         #endregion
 
         public event Action OnBatchComplete;
@@ -66,39 +103,28 @@ namespace Terrain3DTools.Core
         public override void _ExitTree()
         {
             if (Instance == this) Instance = null;
-            FlushStaleResources(); // Force clean on exit
+            FlushStaleResources();
         }
 
         public override void _Process(double delta)
         {
-            // 1. Process Graveyard (Free old resources)
             ProcessStaleResources();
 
-            // 2. Handle Completed Batches
-            // Tasks in _inFlightTasks were submitted in a previous frame.
-            // We consider them "logically" complete on CPU.
             if (_inFlightTasks.Count > 0)
             {
                 int completedCount = _inFlightTasks.Count;
                 foreach (var task in _inFlightTasks)
                 {
-                    if (task.TaskName.Contains("Feature"))
-                    {
-                        DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TaskExecution,
-                        $"Completing task on frame {Engine.GetProcessFrames()} : {task.TaskName}");
-                    }
                     CompleteTask(task);
                 }
                 _inFlightTasks.Clear();
 
-                // Aggregate logging to avoid spam
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TaskExecution,
-                    $"Batch Complete: {completedCount} tasks finished (Logical)");
+                    $"Batch complete: {completedCount} tasks finished");
 
                 OnBatchComplete?.Invoke();
             }
 
-            // 3. Submit New Batch
             if (_readyQueue.Count > 0)
             {
                 SubmitBatch();
@@ -111,50 +137,173 @@ namespace Terrain3DTools.Core
         {
             if (_readyQueue.Count == 0) return;
 
-            int batchCount = 0;
+            // Sync if previous submission is still in flight
+            SyncIfNeeded();
+
+            var groups = BuildParallelGroups();
+
+            int totalDispatched = 0;
+            int groupsDispatched = 0;
             long computeList = Gpu.ComputeListBegin();
 
-            while (_readyQueue.Count > 0 && batchCount < MAX_DISPATCHES_PER_FRAME)
+            for (int g = 0; g < groups.Count; g++)
             {
-                var task = _readyQueue.Dequeue();
-
-                try
+                if (totalDispatched >= MAX_DISPATCHES_PER_FRAME)
                 {
-                    // JIT Allocation
-                    task.Prepare();
+                    RequeueRemainingGroups(groups, g);
+                    break;
+                }
 
-                    if (batchCount > 0)
+                if (g > 0)
+                {
+                    Gpu.Rd.ComputeListAddBarrier(computeList);
+                }
+
+                int dispatchedInGroup = 0;
+                var group = groups[g];
+
+                for (int t = 0; t < group.Count; t++)
+                {
+                    if (totalDispatched >= MAX_DISPATCHES_PER_FRAME)
                     {
-                        Gpu.Rd.ComputeListAddBarrier(computeList);
+                        RequeueRemainingTasks(group, t);
+                        RequeueRemainingGroups(groups, g + 1);
+                        break;
                     }
 
-                    task.GpuCommands?.Invoke(computeList);
+                    var task = group[t];
 
-                    task.State = GpuTaskState.InFlight;
-                    _inFlightTasks.Add(task);
-                    batchCount++;
+                    try
+                    {
+                        task.Prepare();
+                        task.GpuCommands?.Invoke(computeList);
+                        task.State = GpuTaskState.InFlight;
+                        _inFlightTasks.Add(task);
+                        totalDispatched++;
+                        dispatchedInGroup++;
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                            $"Task dispatch failed: {task.TaskName} - {ex.Message}");
+
+                        task.State = GpuTaskState.Completed;
+                        var (rids, paths) = task.ExtractResourcesForCleanup();
+                        QueueCleanup(rids, paths);
+
+                        try { task.OnComplete?.Invoke(); } catch { }
+                        ReleaseDependents(task);
+                    }
                 }
-                catch (Exception ex)
+
+                if (dispatchedInGroup > 0)
                 {
-                    DebugManager.Instance?.LogError(DEBUG_CLASS_NAME, $"Task dispatch failed: {task.TaskName} - {ex.Message}");
-                    task.State = GpuTaskState.Completed;
-
-                    // Even if dispatch failed, we must safely cleanup any resources allocated during Prepare()
-                    var (rids, paths) = task.ExtractResourcesForCleanup();
-                    QueueCleanup(rids, paths);
-
-                    try { task.OnComplete?.Invoke(); } catch { }
-
-                    ReleaseDependents(task);
+                    groupsDispatched++;
                 }
             }
 
             Gpu.ComputeListEnd();
             Gpu.Submit();
-            Gpu.Sync();
+            _hasPendingGpuWork = true;  // Mark that GPU has work in flight
 
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.GpuDispatches,
-                $"Submitted Batch: {batchCount} tasks (Pending: {_readyQueue.Count + _pendingTaskCount})");
+                $"Submitted batch: {totalDispatched} tasks in {groupsDispatched} parallel group(s) " +
+                $"(Pending: {_readyQueue.Count + _pendingTaskCount})");
+        }
+
+        /// <summary>
+        /// Groups ready tasks by resource conflicts for parallel dispatch.
+        /// Tasks within a group have no read/write conflicts and can execute simultaneously.
+        /// Barriers are only inserted between groups.
+        /// </summary>
+        private List<List<AsyncGpuTask>> BuildParallelGroups()
+        {
+            var groups = new List<List<AsyncGpuTask>>();
+            var remaining = new List<AsyncGpuTask>();
+
+            while (_readyQueue.Count > 0)
+            {
+                remaining.Add(_readyQueue.Dequeue());
+            }
+
+            while (remaining.Count > 0)
+            {
+                var group = new List<AsyncGpuTask>();
+                var groupWrites = new HashSet<Rid>();
+                var groupReads = new HashSet<Rid>();
+
+                for (int i = remaining.Count - 1; i >= 0; i--)
+                {
+                    var task = remaining[i];
+
+                    if (CanJoinGroup(task, groupWrites, groupReads))
+                    {
+                        group.Add(task);
+                        groupWrites.UnionWith(task.WriteTargets);
+                        groupReads.UnionWith(task.ReadSources);
+                        remaining.RemoveAt(i);
+                    }
+                }
+
+                if (group.Count == 0 && remaining.Count > 0)
+                {
+                    var task = remaining[0];
+                    group.Add(task);
+                    groupWrites.UnionWith(task.WriteTargets);
+                    groupReads.UnionWith(task.ReadSources);
+                    remaining.RemoveAt(0);
+                }
+
+                if (group.Count > 0)
+                {
+                    groups.Add(group);
+                }
+            }
+
+            if (groups.Count > 1)
+            {
+                int totalTasks = groups.Sum(g => g.Count);
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TaskExecution,
+                    $"Parallel grouping: {totalTasks} tasks → {groups.Count} groups");
+            }
+
+            return groups;
+        }
+
+        /// <summary>
+        /// Determines if a task can be added to the current parallel group without conflicts.
+        /// </summary>
+        private bool CanJoinGroup(AsyncGpuTask task, HashSet<Rid> groupWrites, HashSet<Rid> groupReads)
+        {
+            if (task.WriteTargets.Overlaps(groupWrites))
+                return false;
+
+            if (task.WriteTargets.Overlaps(groupReads))
+                return false;
+
+            if (task.ReadSources.Overlaps(groupWrites))
+                return false;
+
+            return true;
+        }
+
+        private void RequeueRemainingGroups(List<List<AsyncGpuTask>> groups, int startIndex)
+        {
+            for (int g = startIndex; g < groups.Count; g++)
+            {
+                foreach (var task in groups[g])
+                {
+                    _readyQueue.Enqueue(task);
+                }
+            }
+        }
+
+        private void RequeueRemainingTasks(List<AsyncGpuTask> group, int startIndex)
+        {
+            for (int t = startIndex; t < group.Count; t++)
+            {
+                _readyQueue.Enqueue(group[t]);
+            }
         }
         #endregion
 
@@ -164,17 +313,14 @@ namespace Terrain3DTools.Core
             task.State = GpuTaskState.Completed;
             try
             {
-
                 task.OnComplete?.Invoke();
             }
             catch (Exception ex)
             {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME, $"Task callback failed: {task.TaskName} - {ex.Message}");
+                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                    $"Task callback failed: {task.TaskName} - {ex.Message}");
             }
 
-            // --- CRITICAL STABILITY FIX ---
-            // We do NOT call Gpu.FreeRid here. 
-            // We extract the resources and queue them for deferred cleanup.
             var (rids, paths) = task.ExtractResourcesForCleanup();
             QueueCleanup(rids, paths);
 
@@ -183,10 +329,9 @@ namespace Terrain3DTools.Core
         }
         #endregion
 
-        #region Resource Graveyard Logic
+        #region Resource Graveyard
         /// <summary>
-        /// Queue a single RID for deferred cleanup. 
-        /// Use this for external systems (like PathLayer) that need safe disposal.
+        /// Queues a single RID for deferred cleanup.
         /// </summary>
         public void QueueCleanup(Rid rid)
         {
@@ -195,7 +340,7 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
-        /// Queue a list of RIDs and Shader paths for deferred cleanup.
+        /// Queues a list of RIDs and shader paths for deferred cleanup.
         /// </summary>
         public void QueueCleanup(List<Rid> rids, List<string> shaderPaths = null)
         {
@@ -220,19 +365,17 @@ namespace Terrain3DTools.Core
             }
         }
 
-        /// <summary>
-        /// Checks the graveyard and frees resources that have aged beyond the threshold.
-        /// </summary>
         private void ProcessStaleResources()
         {
             ulong currentFrame = Engine.GetProcessFrames();
-            ulong safeFrame = currentFrame > (ulong)CleanupFrameThreshold ? currentFrame - (ulong)CleanupFrameThreshold : 0;
+            ulong safeFrame = currentFrame > (ulong)CleanupFrameThreshold
+                ? currentFrame - (ulong)CleanupFrameThreshold
+                : 0;
 
             int freedRids = 0;
             int releasedShaders = 0;
             int skippedInvalid = 0;
 
-            // Free RIDs
             while (_staleResources.Count > 0)
             {
                 var stale = _staleResources.Peek();
@@ -246,10 +389,10 @@ namespace Terrain3DTools.Core
                         Gpu.FreeRid(stale.Rid);
                         freedRids++;
                     }
-                    catch (System.Exception ex)
+                    catch (Exception ex)
                     {
                         DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
-                            $"Failed to free RID (may already be freed): {ex.Message}");
+                            $"Failed to free RID: {ex.Message}");
                         skippedInvalid++;
                     }
                 }
@@ -259,7 +402,6 @@ namespace Terrain3DTools.Core
                 }
             }
 
-            // Release Shader Refs
             while (_staleShaderRefs.Count > 0)
             {
                 var stale = _staleShaderRefs.Peek();
@@ -273,21 +415,22 @@ namespace Terrain3DTools.Core
             if (freedRids > 0 || releasedShaders > 0 || skippedInvalid > 0)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.GpuResources,
-                    $"Graveyard Cleanup: Freed {freedRids} RIDs, Released {releasedShaders} Shaders, Skipped {skippedInvalid} invalid");
+                    $"Graveyard cleanup: Freed {freedRids} RIDs, Released {releasedShaders} shaders" +
+                    (skippedInvalid > 0 ? $", Skipped {skippedInvalid} invalid" : ""));
             }
         }
 
         private void FlushStaleResources()
         {
-            // If the manager is being destroyed, we force wait for the GPU and clean everything immediately.
-            Gpu.Sync();
+            SyncIfNeeded();
 
             int count = _staleResources.Count + _staleShaderRefs.Count;
 
             while (_staleResources.Count > 0)
             {
                 var stale = _staleResources.Dequeue();
-                Gpu.FreeRid(stale.Rid);
+                if (stale.Rid.IsValid)
+                    Gpu.FreeRid(stale.Rid);
             }
 
             while (_staleShaderRefs.Count > 0)
@@ -301,7 +444,7 @@ namespace Terrain3DTools.Core
         }
         #endregion
 
-        #region Dependency Logic
+        #region Dependency Management
         public void AddTask(AsyncGpuTask task)
         {
             if (_allTasks.ContainsKey(task.Id)) return;
@@ -351,6 +494,8 @@ namespace Terrain3DTools.Core
 
         public void CancelAllPending()
         {
+            SyncIfNeeded();
+
             int count = _readyQueue.Count + _allTasks.Count;
             _readyQueue.Clear();
             _inFlightTasks.Clear();

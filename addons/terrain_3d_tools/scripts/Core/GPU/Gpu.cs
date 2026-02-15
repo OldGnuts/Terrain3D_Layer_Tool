@@ -49,11 +49,19 @@ namespace Terrain3DTools.Core
         {
             return _renderingDevice.TextureCreate(format, view);
         }
-
         /// <summary>
-        /// Convenience overload for creating a 2D texture.
+        /// Convenience overload for creating a 2D texture with optional initial data.
         /// </summary>
-        public static Rid CreateTexture2D(uint width, uint height, RenderingDevice.DataFormat format, RenderingDevice.TextureUsageBits usage)
+        /// <param name="width">Texture width in pixels</param>
+        /// <param name="height">Texture height in pixels</param>
+        /// <param name="format">The data format for the texture</param>
+        /// <param name="usage">Usage flags for the texture</param>
+        /// <param name="initialData">Optional initial data to populate the texture. 
+        /// If null, texture is created uninitialized. If provided, must match texture size.</param>
+        public static Rid CreateTexture2D(uint width, uint height,
+            RenderingDevice.DataFormat format,
+            RenderingDevice.TextureUsageBits usage,
+            byte[] initialData = null)
         {
             var rdFormat = new RDTextureFormat
             {
@@ -63,7 +71,14 @@ namespace Terrain3DTools.Core
                 UsageBits = usage,
                 TextureType = RenderingDevice.TextureType.Type2D,
             };
-            return _renderingDevice.TextureCreate(rdFormat, new RDTextureView());
+
+            Godot.Collections.Array<byte[]> data = null;
+            if (initialData != null)
+            {
+                data = new Godot.Collections.Array<byte[]> { initialData };
+            }
+
+            return _renderingDevice.TextureCreate(rdFormat, new RDTextureView(), data);
         }
 
         public static Rid CreateTexture2DArray(uint width, uint height, uint layers, RenderingDevice.DataFormat format, RenderingDevice.TextureUsageBits usage)
@@ -149,54 +164,6 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
-        /// Updates a storage buffer with new data from the CPU.
-        /// </summary>
-        public static void BufferUpdate(Rid buffer, uint offset, byte[] data)
-        {
-            if (buffer.IsValid && data != null && data.Length > 0)
-            {
-                _renderingDevice.BufferUpdate(buffer, offset, (uint)data.Length, data);
-            }
-        }
-
-        /// <summary>
-        /// NOTE: that this DOES NOT obey a compute list. Use GpuKernels copy kernel instead
-        /// as this will not obey a barrier and attempt to access rids before they are valid.
-        /// Adds a command to an existing compute list to copy one 2D texture to another.
-        /// This is a high-performance, GPU-native operation.
-        /// </summary>
-        public static void AddCopyTextureCommand(long computeList, Rid sourceTexture, Rid destinationTexture, uint width, uint height)
-        {
-            if (!sourceTexture.IsValid || !destinationTexture.IsValid)
-            {
-                GD.PrintErr("[Gpu.cs] Invalid RID provided for texture copy command.");
-                return;
-            }
-
-            _renderingDevice.ComputeListAddBarrier(computeList);
-
-            var fromPos = new Vector3(0, 0, 0);
-            var toPos = new Vector3(0, 0, 0);
-            var size = new Vector3(width, height, 1);
-
-            // Note: In Godot 4.3+, TextureCopy is the direct method.
-            // This is the correct way to add a transfer operation to a compute list.
-            _renderingDevice.TextureCopy(
-                fromTexture: sourceTexture,
-                toTexture: destinationTexture,
-                fromPos: fromPos,
-                toPos: toPos,
-                size: size,
-                srcMipmap: 0,
-                dstMipmap: 0,
-                srcLayer: 0,
-                dstLayer: 0
-            );
-
-            _renderingDevice.ComputeListAddBarrier(computeList);
-        }
-
-        /// <summary>
         /// Adds a command to an existing compute list to copy a 2D texture into one slice of a texture array.
         /// This function does NOT submit or sync; it only queues the command.
         /// </summary>
@@ -236,64 +203,9 @@ namespace Terrain3DTools.Core
 
             _renderingDevice.ComputeListAddBarrier(computeList);
         }
-
-        public static void TextureUpdate(Rid texture, uint layer, byte[] data, Rect2I rect)
-        {
-            if (texture.IsValid && data != null && data.Length > 0)
-            {
-                // Note: Godot 4.3+ has an overload with Rect2I, which is more efficient.
-                // If using an older version, you might need to use the version without the rect.
-                _renderingDevice.TextureUpdate(texture, layer, data);
-            }
-        }
         #endregion
 
         #region Execution
-        /// <summary>
-        /// Dispatches a compute operation asynchronously.
-        /// </summary>
-        /// <param name="pipeline">The compute pipeline to execute.</param>
-        /// <param name="uniformSet">The uniform set with bound resources.</param>
-        /// <param name="pushConstants">The push constant data, if any.</param>
-        /// <param name="xGroups">Number of workgroups in the X dimension.</param>
-        /// <param name="yGroups">Number of workgroups in the Y dimension.</param>
-        /// <param name="zGroups">Number of workgroups in the Z dimension.</param>
-        public static void Dispatch(Rid pipeline, Rid uniformSet, byte[] pushConstants, uint xGroups, uint yGroups, uint zGroups)
-        {
-            long computeList = _renderingDevice.ComputeListBegin();
-            _renderingDevice.ComputeListBindComputePipeline(computeList, pipeline);
-            if (pushConstants != null && pushConstants.Length > 0)
-            {
-                _renderingDevice.ComputeListSetPushConstant(computeList, pushConstants, (uint)pushConstants.Length);
-            }
-            if (uniformSet.IsValid)
-            {
-                _renderingDevice.ComputeListBindUniformSet(computeList, uniformSet, 0);
-            }
-            _renderingDevice.ComputeListDispatch(computeList, xGroups, yGroups, zGroups);
-            _renderingDevice.ComputeListEnd();
-
-            _renderingDevice.Submit();
-        }
-
-        /// <summary>
-        /// Dispatches a compute operation and blocks the thread until it completes.
-        /// </summary>
-        public static void DispatchAndWait(Rid pipeline, Rid uniformSet, byte[] pushConstants, uint xGroups, uint yGroups, uint zGroups)
-        {
-            Dispatch(pipeline, uniformSet, pushConstants, xGroups, yGroups, zGroups);
-            _renderingDevice.Sync();
-        }
-
-        public static void AddDispatchToComputeList_WithLog(long computeList, Rid pipeline, string shaderPath, Rid uniformSet, byte[] pushConstants, uint xGroups, uint yGroups, uint zGroups)
-        {
-            // This log will be our ground truth.
-            GD.Print($"[GPU_DISPATCH] Binding pipeline {pipeline.Id} for shader '{shaderPath}'");
-
-            // Now call the original method
-            AddDispatchToComputeList(computeList, pipeline, uniformSet, pushConstants, xGroups, yGroups, zGroups);
-        }
-
         /// <summary>
         /// Async method to build a command list for later execution
         /// </summary>
