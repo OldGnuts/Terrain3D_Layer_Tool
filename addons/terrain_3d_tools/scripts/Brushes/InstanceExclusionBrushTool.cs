@@ -1,6 +1,5 @@
 // /Brushes/InstanceExclusionBrushTool.cs
 using Godot;
-using System;
 using System.Collections.Generic;
 using Terrain3DTools.Core;
 using Terrain3DTools.Core.Debug;
@@ -11,8 +10,8 @@ namespace Terrain3DTools.Brushes
 {
     /// <summary>
     /// Brush tool for painting instance exclusion zones.
-    /// Blocks procedural instance placement in painted areas.
-    /// Can also erase exclusion (allow instances again).
+    /// Prevents procedural instances from spawning in painted areas.
+    /// Uses GPU compute with fast path dual-write.
     /// </summary>
     public class InstanceExclusionBrushTool : IBrushTool
     {
@@ -20,7 +19,7 @@ namespace Terrain3DTools.Brushes
 
         private readonly BrushStrokeState _strokeState = new();
 
-        public string ToolName => "Exclude Instances";
+        public string ToolName => "Instance Exclusion";
         public bool IsStrokeActive => _strokeState.IsActive;
 
         public InstanceExclusionBrushTool()
@@ -28,36 +27,44 @@ namespace Terrain3DTools.Brushes
             DebugManager.Instance?.RegisterClass(DEBUG_CLASS_NAME);
         }
 
-        public void BeginStroke(ManualEditLayer layer, Vector3 worldPos, BrushSettings settings)
+        public void BeginStroke(ManualEditLayer layer, Vector3 worldPos, BrushSettings settings, BrushFastPathContext fastPath)
         {
             _strokeState.Begin(layer, BrushUndoType.InstanceExclusion);
             _strokeState.UpdatePosition(worldPos);
 
-            ApplyBrush(layer, worldPos, settings);
+            ApplyBrushInternal(layer, worldPos, settings, fastPath);
         }
 
-        public void ContinueStroke(ManualEditLayer layer, Vector3 worldPos, BrushSettings settings)
+        public void ContinueStroke(ManualEditLayer layer, Vector3 worldPos, BrushSettings settings, BrushFastPathContext fastPath)
         {
             if (!_strokeState.IsActive) return;
 
-            // Interpolate between last position and current for smooth strokes
             Vector3 lastPos = _strokeState.GetLastPosition();
             float distance = lastPos.DistanceTo(worldPos);
-            float stepSize = settings.Size * 0.25f;
+            float stepSize = settings.ExclusionBrushSize * 0.25f;
 
-            if (distance > stepSize)
+            BrushComputeDispatcher.BeginBatch();
+
+            try
             {
-                int steps = Mathf.CeilToInt(distance / stepSize);
-                for (int i = 1; i <= steps; i++)
+                if (distance > stepSize)
                 {
-                    float t = (float)i / steps;
-                    Vector3 interpPos = lastPos.Lerp(worldPos, t);
-                    ApplyBrush(layer, interpPos, settings);
+                    int steps = Mathf.CeilToInt(distance / stepSize);
+                    for (int i = 1; i <= steps; i++)
+                    {
+                        float t = (float)i / steps;
+                        Vector3 interpPos = lastPos.Lerp(worldPos, t);
+                        ApplyBrushInternal(layer, interpPos, settings, fastPath);
+                    }
+                }
+                else
+                {
+                    ApplyBrushInternal(layer, worldPos, settings, fastPath);
                 }
             }
-            else
+            finally
             {
-                ApplyBrush(layer, worldPos, settings);
+                BrushComputeDispatcher.EndBatch();
             }
 
             _strokeState.UpdatePosition(worldPos);
@@ -65,7 +72,7 @@ namespace Terrain3DTools.Brushes
 
         public BrushUndoData EndStroke(ManualEditLayer layer)
         {
-            return _strokeState.End("Paint exclusion zone");
+            return _strokeState.End($"{ToolName} brush stroke");
         }
 
         public void CancelStroke()
@@ -73,7 +80,7 @@ namespace Terrain3DTools.Brushes
             _strokeState.Cancel();
         }
 
-        private void ApplyBrush(ManualEditLayer layer, Vector3 worldPos, BrushSettings settings)
+        private void ApplyBrushInternal(ManualEditLayer layer, Vector3 worldPos, BrushSettings settings, BrushFastPathContext fastPath)
         {
             int regionSize = layer.RegionSize;
             if (regionSize <= 0)
@@ -82,14 +89,15 @@ namespace Terrain3DTools.Brushes
                 return;
             }
 
-            // Use ExclusionBrushSize if set, otherwise fall back to general Size
-            float brushRadius = (settings.ExclusionBrushSize > 0 ? settings.ExclusionBrushSize : settings.Size) * 0.5f;
+            // Use ExclusionBrushSize for this tool
+            float brushRadius = settings.ExclusionBrushSize * 0.5f;
+            float strength = settings.Strength;
 
-            // Find all regions the brush touches
             var affectedRegions = GetAffectedRegions(worldPos, brushRadius, regionSize);
 
             foreach (var regionCoords in affectedRegions)
             {
+                // Get edit buffer (for undo tracking)
                 var buffer = layer.GetOrCreateEditBuffer(regionCoords);
                 if (buffer == null)
                 {
@@ -97,145 +105,53 @@ namespace Terrain3DTools.Brushes
                     continue;
                 }
 
-                // Ensure exclusion map exists
-                var exclusionRid = buffer.GetOrCreateInstanceExclusion();
-                if (!exclusionRid.IsValid)
+                var exclusionEditRid = buffer.GetOrCreateInstanceExclusion();
+                if (!exclusionEditRid.IsValid)
                 {
-                    GD.PrintErr($"[InstanceExclusionBrushTool] Exclusion RID invalid for region {regionCoords}");
+                    GD.PrintErr($"[InstanceExclusionBrushTool] Exclusion edit RID invalid for region {regionCoords}");
                     continue;
                 }
 
-                // Capture before state for undo
-                _strokeState.MarkRegionAffected(regionCoords, buffer);
+                // Get region data (for display) - REQUIRED
+                if (fastPath?.GetRegionData == null)
+                {
+                    GD.PrintErr($"[InstanceExclusionBrushTool] FastPath context not available");
+                    continue;
+                }
 
-                // Apply brush to this region
-                ApplyBrushToRegion(
-                    exclusionRid,
+                var regionData = fastPath.GetRegionData(regionCoords);
+                if (regionData == null)
+                {
+                    GD.PrintErr($"[InstanceExclusionBrushTool] No RegionData for region {regionCoords}");
+                    continue;
+                }
+
+                // Get or create exclusion map - this can be lazily created
+                var exclusionMapRid = regionData.GetOrCreateExclusionMap(regionSize);
+                if (!exclusionMapRid.IsValid)
+                {
+                    GD.PrintErr($"[InstanceExclusionBrushTool] Failed to create ExclusionMap for region {regionCoords}");
+                    continue;
+                }
+
+                Rect2I dabBounds = BrushComputeDispatcher.DispatchExclusionBrush(
+                    exclusionEditRid,
+                    exclusionMapRid,
                     regionCoords,
                     regionSize,
                     worldPos,
                     brushRadius,
-                    settings);
+                    strength,
+                    settings.GetFalloffTypeInt(),
+                    settings.Shape == BrushShape.Circle,
+                    settings.ExclusionMode,        // addExclusion
+                    settings.ExclusionAccumulate   // accumulate
+                );
 
-                layer.MarkRegionEdited(regionCoords);
-            }
-        }
-
-        private void ApplyBrushToRegion(
-            Rid exclusionRid,
-            Vector2I regionCoords,
-            int regionSize,
-            Vector3 worldPos,
-            float brushRadius,
-            BrushSettings settings)
-        {
-            // Calculate region bounds in world space
-            float regionMinX = regionCoords.X * regionSize;
-            float regionMinZ = regionCoords.Y * regionSize;
-
-            // Calculate brush bounds in pixel space for this region
-            int minPx = Mathf.Max(0, Mathf.FloorToInt(worldPos.X - brushRadius - regionMinX));
-            int maxPx = Mathf.Min(regionSize - 1, Mathf.CeilToInt(worldPos.X + brushRadius - regionMinX));
-            int minPz = Mathf.Max(0, Mathf.FloorToInt(worldPos.Z - brushRadius - regionMinZ));
-            int maxPz = Mathf.Min(regionSize - 1, Mathf.CeilToInt(worldPos.Z + brushRadius - regionMinZ));
-
-            if (minPx > maxPx || minPz > maxPz) return;
-
-            // Read current data
-            byte[] currentData = null;
-            try
-            {
-                currentData = Gpu.Rd.TextureGetData(exclusionRid, 0);
-            }
-            catch (Exception ex)
-            {
-                GD.PrintErr($"[InstanceExclusionBrushTool] Failed to read texture data: {ex.Message}");
-                return;
-            }
-
-            if (currentData == null || currentData.Length == 0)
-            {
-                GD.PrintErr("[InstanceExclusionBrushTool] Current data is null or empty");
-                return;
-            }
-
-            float[] exclusionValues = BytesToFloats(currentData);
-            bool modified = false;
-
-            // Determine if we're adding or removing exclusion
-            // ExclusionMode: true = add exclusion (block instances), false = remove exclusion (allow instances)
-            bool addingExclusion = settings.ExclusionMode;
-            float targetValue = addingExclusion ? 1.0f : 0.0f;
-
-            // Apply brush
-            for (int pz = minPz; pz <= maxPz; pz++)
-            {
-                for (int px = minPx; px <= maxPx; px++)
+                if (dabBounds.Size.X > 0 && dabBounds.Size.Y > 0)
                 {
-                    // World position of this pixel
-                    float worldX = regionMinX + px + 0.5f;
-                    float worldZ = regionMinZ + pz + 0.5f;
-
-                    // Distance from brush center
-                    float dx = worldX - worldPos.X;
-                    float dz = worldZ - worldPos.Z;
-                    float distance = Mathf.Sqrt(dx * dx + dz * dz);
-
-                    // Check brush shape
-                    bool inBrush = settings.Shape == BrushShape.Circle
-                        ? distance <= brushRadius
-                        : Mathf.Abs(dx) <= brushRadius && Mathf.Abs(dz) <= brushRadius;
-
-                    if (!inBrush) continue;
-
-                    // Calculate falloff
-                    float normalizedDist = distance / brushRadius;
-                    float falloff = settings.CalculateFalloff(normalizedDist);
-
-                    // Calculate effective strength
-                    float effectiveStrength = settings.Strength * falloff;
-                    if (effectiveStrength < 0.01f) continue;
-
-                    int idx = pz * regionSize + px;
-                    if (idx >= 0 && idx < exclusionValues.Length)
-                    {
-                        float currentValue = exclusionValues[idx];
-                        float newValue;
-
-                        if (settings.ExclusionAccumulate)
-                        {
-                            // Accumulate toward target
-                            if (addingExclusion)
-                            {
-                                newValue = Mathf.Min(1.0f, currentValue + effectiveStrength * 0.2f);
-                            }
-                            else
-                            {
-                                newValue = Mathf.Max(0.0f, currentValue - effectiveStrength * 0.2f);
-                            }
-                        }
-                        else
-                        {
-                            // Direct lerp to target
-                            newValue = Mathf.Lerp(currentValue, targetValue, effectiveStrength);
-                        }
-
-                        exclusionValues[idx] = Mathf.Clamp(newValue, 0.0f, 1.0f);
-                        modified = true;
-                    }
-                }
-            }
-
-            if (modified)
-            {
-                byte[] newData = FloatsToBytes(exclusionValues);
-                try
-                {
-                    Gpu.Rd.TextureUpdate(exclusionRid, 0, newData);
-                }
-                catch (Exception ex)
-                {
-                    GD.PrintErr($"[InstanceExclusionBrushTool] Failed to update texture: {ex.Message}");
+                    _strokeState.MarkRegionAffected(regionCoords, buffer, dabBounds);
+                    fastPath.MarkRegionDirty?.Invoke(regionCoords);
                 }
             }
         }
@@ -264,23 +180,5 @@ namespace Terrain3DTools.Brushes
 
             return regions;
         }
-
-        #region Byte/Float Conversion
-
-        private float[] BytesToFloats(byte[] bytes)
-        {
-            float[] floats = new float[bytes.Length / 4];
-            Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
-            return floats;
-        }
-
-        private byte[] FloatsToBytes(float[] floats)
-        {
-            byte[] bytes = new byte[floats.Length * 4];
-            Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
-            return bytes;
-        }
-
-        #endregion
     }
 }
