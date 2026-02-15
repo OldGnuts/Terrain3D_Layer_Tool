@@ -110,6 +110,23 @@ namespace Terrain3DTools.Layers
         public Rid layerHeightVisualizationTextureRID;
         #endregion
 
+        #region Resource Declaration for Parallel Dispatch
+
+        /// <summary>
+        /// Returns all RIDs this layer writes to during mask generation.
+        /// Override in subclasses that have additional internal textures.
+        /// </summary>
+        public virtual IEnumerable<Rid> GetMaskWriteTargets()
+        {
+            if (layerTextureRID.IsValid)
+                yield return layerTextureRID;
+
+            if (layerHeightVisualizationTextureRID.IsValid)
+                yield return layerHeightVisualizationTextureRID;
+        }
+
+        #endregion
+
         #region Abstract Methods
 
         /// <summary>
@@ -269,7 +286,7 @@ namespace Terrain3DTools.Layers
                     Gpu.FreeRid(rid);
                 }
             }
-            
+
 
             return Gpu.CreateTexture2D(
                 (uint)maskWidth, (uint)maskHeight,

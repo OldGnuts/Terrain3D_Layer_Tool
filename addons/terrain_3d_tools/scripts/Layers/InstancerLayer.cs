@@ -342,5 +342,34 @@ namespace Terrain3DTools.Layers
             ForceDirty();
         }
         #endregion
+        #region Resource Declaration for Parallel Dispatch
+
+        /// <summary>
+        /// Returns all RIDs this layer writes to during mask generation.
+        /// Includes density mask texture.
+        /// </summary>
+        public override IEnumerable<Rid> GetMaskWriteTargets()
+        {
+            foreach (var rid in base.GetMaskWriteTargets())
+                yield return rid;
+        }
+
+        /// <summary>
+        /// Returns the RIDs for instance buffer outputs for a specific region.
+        /// Used for parallel dispatch grouping during placement phase.
+        /// </summary>
+        public IEnumerable<Rid> GetInstanceBufferWriteTargets(RegionData regionData, ulong layerInstanceId)
+        {
+            var buffer = regionData.GetInstanceBuffer(layerInstanceId);
+            if (buffer != null)
+            {
+                if (buffer.TransformBuffer.IsValid)
+                    yield return buffer.TransformBuffer;
+                if (buffer.CountBuffer.IsValid)
+                    yield return buffer.CountBuffer;
+            }
+        }
+
+        #endregion
     }
 }
