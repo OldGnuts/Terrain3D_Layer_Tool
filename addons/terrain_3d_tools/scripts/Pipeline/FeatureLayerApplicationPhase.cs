@@ -1,4 +1,3 @@
-// /Pipeline/FeatureLayerApplicationPhase.cs
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -10,6 +9,9 @@ using Terrain3DTools.Core.Debug;
 
 namespace Terrain3DTools.Pipeline
 {
+    /// <summary>
+    /// Phase 6: Applies feature layers to region height and control maps.
+    /// </summary>
     public class FeatureLayerApplicationPhase : IProcessingPhase
     {
         private const string DEBUG_CLASS_NAME = "FeatureLayerApplicationPhase";
@@ -38,6 +40,10 @@ namespace Terrain3DTools.Pipeline
 
                 var currentRegionCoords = regionCoords;
                 var dependencies = new List<AsyncGpuTask>();
+                var readSources = new List<Rid>();
+                var writeTargets = new List<Rid>();
+
+                var regionData = context.RegionMapManager.GetOrCreateRegionData(regionCoords);
 
                 foreach (var featureLayer in validFeatureLayers)
                 {
@@ -49,6 +55,24 @@ namespace Terrain3DTools.Pipeline
 
                     if (featureLayer.ModifiesTexture && context.RegionTextureCompositeTasks.ContainsKey(regionCoords))
                         dependencies.Add(context.RegionTextureCompositeTasks[regionCoords]);
+
+                    foreach (var rid in featureLayer.GetMaskWriteTargets())
+                    {
+                        if (rid.IsValid)
+                            readSources.Add(rid);
+                    }
+
+                    if (featureLayer.ModifiesHeight && regionData.HeightMap.IsValid)
+                    {
+                        if (!writeTargets.Contains(regionData.HeightMap))
+                            writeTargets.Add(regionData.HeightMap);
+                    }
+
+                    if (featureLayer.ModifiesTexture && regionData.ControlMap.IsValid)
+                    {
+                        if (!writeTargets.Contains(regionData.ControlMap))
+                            writeTargets.Add(regionData.ControlMap);
+                    }
                 }
 
                 Action onComplete = () =>
@@ -65,11 +89,17 @@ namespace Terrain3DTools.Pipeline
 
                 if (task != null)
                 {
+                    task.DeclareResources(
+                        writes: writeTargets,
+                        reads: readSources
+                    );
+
                     tasks[currentRegionCoords] = task;
                     context.RegionFeatureApplicationTasks[currentRegionCoords] = task; 
                     AsyncGpuTaskManager.Instance.AddTask(task);
+                    
                     DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                        $"Feature layer application task added to AsynceGpuTaskManager on Frame : {Engine.GetProcessFrames}");
+                        $"Feature application task added for region {regionCoords}");
                 }
             }
 
@@ -85,8 +115,6 @@ namespace Terrain3DTools.Pipeline
         {
             int regionSize = context.RegionSize;
             
-            // Capture BakeState for all PathLayers NOW (Main Thread).
-            // This ensures the worker thread sees the exact same state that Phase 5 saw.
             var pathLayerStates = new Dictionary<PathLayer, PathLayer.PathBakeState>();
             foreach (var layer in featureLayers)
             {
@@ -117,11 +145,10 @@ namespace Terrain3DTools.Pipeline
 
                     (Action<long> cmd, List<Rid> rids, List<string> shaders) result;
 
-                    // If it's a PathLayer, inject the pre-captured state
                     if (layer is PathLayer pl && pathLayerStates.TryGetValue(pl, out var capturedState))
                     {
                         DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                            $"Creating apply region commands for path layer from state on frame {Engine.GetProcessFrames().ToString()} \n Captured state : {capturedState} \n for region at : {regionCoords}");
+                            $"Applying path layer '{pl.LayerName}' to region {regionCoords}");
                                 
                         result = pl.CreateApplyRegionCommandsFromState(
                             capturedState,
@@ -156,7 +183,6 @@ namespace Terrain3DTools.Pipeline
 
                 Action<long> combinedCommands = (computeList) =>
                 {
-                    Gpu.Rd.ComputeListAddBarrier(computeList);
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
@@ -178,7 +204,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Feature application: Region {regionCoords} (Lazy)",
+                $"Feature Application: Region {regionCoords}",
                 dependencies);
         }
     }

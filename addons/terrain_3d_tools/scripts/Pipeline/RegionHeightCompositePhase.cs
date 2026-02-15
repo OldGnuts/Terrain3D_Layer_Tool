@@ -1,17 +1,17 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Utils;
 using Terrain3DTools.Core;
 using Terrain3DTools.Core.Debug;
-using System;
 
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 2: Composites height layers into region heightmaps.
-    /// Refactored to use Lazy (JIT) initialization to prevent allocation spikes.
+    /// Uses lazy (JIT) initialization to prevent allocation spikes.
     /// </summary>
     public class RegionHeightCompositePhase : IProcessingPhase
     {
@@ -54,6 +54,13 @@ namespace Terrain3DTools.Pipeline
                     context.RegionMapManager.RefreshRegionPreview(currentRegionCoords);
                 };
 
+                var regionData = context.RegionMapManager.GetOrCreateRegionData(regionCoords);
+
+                var readSources = allHeightLayers
+                    .Where(l => l.layerTextureRID.IsValid)
+                    .Select(l => l.layerTextureRID)
+                    .ToList();
+
                 var task = CreateRegionHeightCompositeTaskLazy(
                     currentRegionCoords,
                     allHeightLayers,
@@ -63,6 +70,11 @@ namespace Terrain3DTools.Pipeline
 
                 if (task != null)
                 {
+                    task.DeclareResources(
+                        writes: new[] { regionData.HeightMap },
+                        reads: readSources
+                    );
+
                     context.RegionHeightCompositeTasks[currentRegionCoords] = task;
                     tasks[currentRegionCoords] = task;
                     AsyncGpuTaskManager.Instance.AddTask(task);
@@ -72,10 +84,6 @@ namespace Terrain3DTools.Pipeline
             return tasks;
         }
 
-        /// <summary>
-        /// Creates a Lazy AsyncGpuTask to composite height layers.
-        /// Allocation of commands and resources happens only when the task is Prepared.
-        /// </summary>
         private AsyncGpuTask CreateRegionHeightCompositeTaskLazy(
             Vector2I regionCoords,
             List<TerrainLayerBase> heightLayers,
@@ -83,22 +91,19 @@ namespace Terrain3DTools.Pipeline
             Action onComplete,
             TerrainProcessingContext context)
         {
-            // Capture state for the closure
             int regionSize = context.RegionSize;
             
-            // --- GENERATOR FUNCTION ---
             Func<(Action<long>, List<Rid>, List<string>)> generator = () =>
             {
                 var regionData = context.RegionMapManager.GetOrCreateRegionData(regionCoords);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.RegionCompositing,
-                    $"JIT Prep: Region {regionCoords}");
+                    $"Preparing region {regionCoords}");
 
                 var allCommands = new List<Action<long>>();
                 var allTempRids = new List<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // 1. Clear Command
                 var (clearCmd, clearRids, clearShader) = GpuKernels.CreateClearCommands(
                     regionData.HeightMap,
                     Colors.Black,
@@ -113,7 +118,6 @@ namespace Terrain3DTools.Pipeline
                     allShaderPaths.Add(clearShader);
                 }
 
-                // 2. Apply Layers
                 if (heightLayers.Count > 0)
                 {
                     var regionMin = TerrainCoordinateHelper.RegionMinWorld(regionCoords, regionSize);
@@ -139,7 +143,6 @@ namespace Terrain3DTools.Pipeline
                     }
                 }
 
-                // 3. Combine
                 if (allCommands.Count == 0) 
                 {
                     return ((l) => { }, new List<Rid>(), new List<string>());
@@ -147,9 +150,6 @@ namespace Terrain3DTools.Pipeline
 
                 Action<long> combinedCommands = (computeList) =>
                 {
-                    // Barrier before start
-                    Gpu.Rd.ComputeListAddBarrier(computeList);
-                    
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
@@ -163,13 +163,6 @@ namespace Terrain3DTools.Pipeline
                 return (combinedCommands, allTempRids, allShaderPaths);
             };
 
-            // Owners for resource tracking (safe to resolve now as they are just object references)
-            // Note: We access RegionData here just to get the reference for 'owners', 
-            // but we don't allocate its textures here. The RegionMapManager manages that lifecycle.
-            // If RegionData creation is expensive, it might be an issue, but usually it's just RIDs.
-            // Actually, context.RegionMapManager.GetOrCreateRegionData IS executed immediately here
-            // to populate 'owners'. This is acceptable because regions persist across updates.
-            // We are mostly saving on the CreateClearCommands / CreateApplyRegionCommands allocation.
             var regionDataRef = context.RegionMapManager.GetOrCreateRegionData(regionCoords);
             var owners = new List<object> { regionDataRef };
             owners.AddRange(heightLayers);
@@ -178,7 +171,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Region {regionCoords} height composite (Lazy)",
+                $"Height Composite: Region {regionCoords}",
                 dependencies);
         }
     }

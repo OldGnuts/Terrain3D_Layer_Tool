@@ -1,4 +1,5 @@
 // /Pipeline/ManualEditApplicationPhase.cs
+
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -14,9 +15,7 @@ namespace Terrain3DTools.Pipeline
     /// <summary>
     /// Phase 9: Applies manual edits to region height and texture data.
     /// Runs after blend smoothing and before instancer placement.
-    /// 
-    /// Manual edits are applied on top of composited/processed data,
-    /// ensuring they persist through upstream layer regeneration.
+    /// Manual edits are applied on top of composited/processed data.
     /// </summary>
     public class ManualEditApplicationPhase : IProcessingPhase
     {
@@ -31,9 +30,8 @@ namespace Terrain3DTools.Pipeline
         {
             var tasks = new Dictionary<object, AsyncGpuTask>();
 
-            // Find all ManualEditLayers in the scene
             var manualEditLayers = FindManualEditLayers(context);
-            
+
             if (manualEditLayers.Count == 0)
             {
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
@@ -41,7 +39,6 @@ namespace Terrain3DTools.Pipeline
                 return tasks;
             }
 
-            // Set region size on all manual edit layers
             foreach (var layer in manualEditLayers)
             {
                 layer.SetRegionSize(context.RegionSize);
@@ -50,13 +47,11 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
                 $"Processing {manualEditLayers.Count} ManualEditLayer(s) for {context.AllDirtyRegions.Count} dirty region(s)");
 
-            // Process each dirty region
             foreach (var regionCoords in context.AllDirtyRegions)
             {
                 if (!context.CurrentlyActiveRegions.Contains(regionCoords))
                     continue;
 
-                // Collect all layers that have edits in this region
                 var layersWithEdits = manualEditLayers
                     .Where(l => l.HasEditsInRegion(regionCoords))
                     .ToList();
@@ -67,10 +62,38 @@ namespace Terrain3DTools.Pipeline
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
                     $"Region {regionCoords} has edits from {layersWithEdits.Count} layer(s)");
 
-                // Build dependencies
                 var dependencies = BuildDependencies(regionCoords, context);
 
-                // Create the task
+                var regionData = context.RegionMapManager.GetRegionData(regionCoords);
+                if (regionData == null) continue;
+
+                // Collect write targets
+                var writeTargets = new List<Rid>();
+                if (regionData.HeightMap.IsValid)
+                    writeTargets.Add(regionData.HeightMap);
+                if (regionData.ControlMap.IsValid)
+                    writeTargets.Add(regionData.ControlMap);
+
+                // Check if any layer modifies exclusion
+                bool modifiesExclusion = layersWithEdits.Any(l => l.InstanceEditingEnabled);
+                if (modifiesExclusion)
+                {
+                    var exclusionMap = regionData.GetOrCreateExclusionMap(context.RegionSize);
+                    if (exclusionMap.IsValid)
+                        writeTargets.Add(exclusionMap);
+                }
+
+                // Collect read sources from edit buffers
+                var readSources = new List<Rid>();
+                foreach (var layer in layersWithEdits)
+                {
+                    foreach (var rid in layer.GetEditBufferReadSources(regionCoords))
+                    {
+                        if (rid.IsValid)
+                            readSources.Add(rid);
+                    }
+                }
+
                 var task = CreateManualEditApplicationTaskLazy(
                     regionCoords,
                     layersWithEdits,
@@ -79,6 +102,11 @@ namespace Terrain3DTools.Pipeline
 
                 if (task != null)
                 {
+                    task.DeclareResources(
+                        writes: writeTargets,
+                        reads: readSources
+                    );
+
                     tasks[regionCoords] = task;
                     context.ManualEditApplicationTasks[regionCoords] = task;
                     AsyncGpuTaskManager.Instance.AddTask(task);
@@ -94,15 +122,9 @@ namespace Terrain3DTools.Pipeline
             return tasks;
         }
 
-        /// <summary>
-        /// Finds all valid ManualEditLayers in the layer collection.
-        /// </summary>
         private List<ManualEditLayer> FindManualEditLayers(TerrainProcessingContext context)
         {
             var result = new List<ManualEditLayer>();
-
-            // Get layers from the dependency manager's feature layers for each region
-            // This ensures we only consider layers that are part of the active terrain system
             var allRegions = context.CurrentlyActiveRegions;
             var seenLayerIds = new HashSet<ulong>();
 
@@ -113,7 +135,7 @@ namespace Terrain3DTools.Pipeline
 
                 foreach (var layer in tieredLayers.FeatureLayers)
                 {
-                    if (layer is ManualEditLayer mel && 
+                    if (layer is ManualEditLayer mel &&
                         GodotObject.IsInstanceValid(mel) &&
                         seenLayerIds.Add(mel.GetInstanceId()))
                     {
@@ -122,7 +144,6 @@ namespace Terrain3DTools.Pipeline
                 }
             }
 
-            // Also check DirtyFeatureLayers for newly added layers
             foreach (var layer in context.DirtyFeatureLayers)
             {
                 if (layer is ManualEditLayer mel &&
@@ -136,46 +157,31 @@ namespace Terrain3DTools.Pipeline
             return result;
         }
 
-        /// <summary>
-        /// Builds dependency list for manual edit application.
-        /// Manual edits depend on all previous compositing and processing phases.
-        /// </summary>
         private List<AsyncGpuTask> BuildDependencies(
             Vector2I regionCoords,
             TerrainProcessingContext context)
         {
             var dependencies = new List<AsyncGpuTask>();
 
-            // Depend on height composite
             if (context.RegionHeightCompositeTasks.TryGetValue(regionCoords, out var heightTask))
-            {
                 dependencies.Add(heightTask);
-            }
 
-            // Depend on texture composite
             if (context.RegionTextureCompositeTasks.TryGetValue(regionCoords, out var textureTask))
-            {
                 dependencies.Add(textureTask);
-            }
 
-            // Depend on feature application (paths, etc.)
             if (context.RegionFeatureApplicationTasks.TryGetValue(regionCoords, out var featureTask))
-            {
                 dependencies.Add(featureTask);
-            }
 
-            // Depend on blend smoothing if enabled
             if (context.BlendSmoothingTasks.TryGetValue(regionCoords, out var smoothTask))
-            {
                 dependencies.Add(smoothTask);
-            }
+
+            // Also depend on exclusion write if present
+            if (context.ExclusionWriteTasks.TryGetValue(regionCoords, out var exclusionTask))
+                dependencies.Add(exclusionTask);
 
             return dependencies;
         }
 
-        /// <summary>
-        /// Creates a lazy GPU task to apply manual edits to a region.
-        /// </summary>
         private AsyncGpuTask CreateManualEditApplicationTaskLazy(
             Vector2I regionCoords,
             List<ManualEditLayer> layersWithEdits,
@@ -184,8 +190,6 @@ namespace Terrain3DTools.Pipeline
         {
             int regionSize = context.RegionSize;
 
-            // Capture layer states for the closure
-            // We capture references to the edit buffers now (main thread)
             var layerBufferPairs = new List<(ManualEditLayer layer, ManualEditBuffer buffer)>();
             foreach (var layer in layersWithEdits)
             {
@@ -201,7 +205,6 @@ namespace Terrain3DTools.Pipeline
                 return null;
             }
 
-            // Generator function - executed when task is prepared
             Func<(Action<long>, List<Rid>, List<string>)> generator = () =>
             {
                 var regionData = context.RegionMapManager.GetRegionData(regionCoords);
@@ -216,20 +219,15 @@ namespace Terrain3DTools.Pipeline
                 var allTempRids = new List<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // Process each layer's edits in order
                 foreach (var (layer, buffer) in layerBufferPairs)
                 {
                     if (!GodotObject.IsInstanceValid(layer))
                         continue;
 
-                    // Apply height edits
                     if (layer.HeightEditingEnabled && buffer.HeightDelta.IsValid)
                     {
                         var (heightCmd, heightRids, heightShaders) = CreateHeightEditCommands(
-                            regionCoords,
-                            regionData,
-                            buffer,
-                            regionSize);
+                            regionCoords, regionData, buffer, regionSize);
 
                         if (heightCmd != null)
                         {
@@ -239,14 +237,10 @@ namespace Terrain3DTools.Pipeline
                         }
                     }
 
-                    // Apply texture edits
                     if (layer.TextureEditingEnabled && buffer.TextureEdit.IsValid)
                     {
                         var (textureCmd, textureRids, textureShaders) = CreateTextureEditCommands(
-                            regionCoords,
-                            regionData,
-                            buffer,
-                            regionSize);
+                            regionCoords, regionData, buffer, regionSize);
 
                         if (textureCmd != null)
                         {
@@ -256,14 +250,10 @@ namespace Terrain3DTools.Pipeline
                         }
                     }
 
-                    // Apply instance exclusion
                     if (layer.InstanceEditingEnabled && buffer.InstanceExclusion.IsValid)
                     {
                         var (exclusionCmd, exclusionRids, exclusionShaders) = CreateInstanceExclusionCommands(
-                            regionCoords,
-                            regionData,
-                            buffer,
-                            regionSize);
+                            regionCoords, regionData, buffer, regionSize);
 
                         if (exclusionCmd != null)
                         {
@@ -279,15 +269,12 @@ namespace Terrain3DTools.Pipeline
                     return ((l) => { }, new List<Rid>(), new List<string>());
                 }
 
-                // Combine all commands with barriers
                 Action<long> combinedCommands = (computeList) =>
                 {
-                    Gpu.Rd.ComputeListAddBarrier(computeList);
-                    
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
-                        
+
                         if (i < allCommands.Count - 1)
                         {
                             Gpu.Rd.ComputeListAddBarrier(computeList);
@@ -301,16 +288,14 @@ namespace Terrain3DTools.Pipeline
                 return (combinedCommands, allTempRids, allShaderPaths);
             };
 
-            // Completion callback
             Action onComplete = () =>
             {
                 context.RegionMapManager.RefreshRegionPreview(regionCoords);
-                
+
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
                     $"Manual edit application complete for region {regionCoords}");
             };
 
-            // Build owners list for resource tracking
             var regionDataRef = context.RegionMapManager.GetRegionData(regionCoords);
             var owners = new List<object> { regionDataRef };
             owners.AddRange(layersWithEdits);
@@ -319,16 +304,12 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Manual edit application: Region {regionCoords}",
+                $"Manual Edit: Region {regionCoords}",
                 dependencies);
         }
 
         #region GPU Command Generators
 
-        /// <summary>
-        /// Creates GPU commands to apply height edits.
-        /// Height edits are additive (-1 to +1 range).
-        /// </summary>
         private (Action<long> commands, List<Rid> tempRids, List<string> shaders) CreateHeightEditCommands(
             Vector2I regionCoords,
             RegionData regionData,
@@ -348,18 +329,15 @@ namespace Terrain3DTools.Pipeline
                 return (null, tempRids, new List<string>());
             }
 
-            // Bind resources
-            op.BindStorageImage(0, regionData.HeightMap);      // In/Out: composited height
-            op.BindStorageImage(1, editBuffer.HeightDelta);    // In: height delta (-1 to +1)
+            op.BindStorageImage(0, regionData.HeightMap);
+            op.BindStorageImage(1, editBuffer.HeightDelta);
 
-            // Push constants
             var pushConstants = GpuUtils.CreatePushConstants()
-                .Add(regionSize)      // u_region_size
-                .AddPadding(12)       // Padding to 16 bytes
+                .Add(regionSize)
+                .AddPadding(12)
                 .Build();
             op.SetPushConstants(pushConstants);
 
-            // Dispatch dimensions
             uint groupsX = (uint)((regionSize + 7) / 8);
             uint groupsY = (uint)((regionSize + 7) / 8);
 
@@ -369,15 +347,11 @@ namespace Terrain3DTools.Pipeline
             return (commands, tempRids, shaderPaths);
         }
 
-        /// <summary>
-        /// Creates GPU commands to apply texture edits.
-        /// Texture edits selectively override base/overlay/blend values.
-        /// </summary>
         private (Action<long> commands, List<Rid> tempRids, List<string> shaders) CreateTextureEditCommands(
-            Vector2I regionCoords,
-            RegionData regionData,
-            ManualEditBuffer editBuffer,
-            int regionSize)
+           Vector2I regionCoords,
+           RegionData regionData,
+           ManualEditBuffer editBuffer,
+           int regionSize)
         {
             const string SHADER_PATH = "res://addons/terrain_3d_tools/Shaders/ManualEdit/apply_texture_edit.glsl";
 
@@ -392,18 +366,23 @@ namespace Terrain3DTools.Pipeline
                 return (null, tempRids, new List<string>());
             }
 
-            // Bind resources
-            op.BindStorageImage(0, regionData.ControlMap);     // In/Out: composited control
-            op.BindStorageImage(1, editBuffer.TextureEdit);    // In: edit data (packed format)
+            op.BindStorageImage(0, regionData.ControlMap);
+            op.BindStorageImage(1, editBuffer.TextureEdit);
 
-            // Push constants
+            // Apply push constants: 8 values × 4 bytes = 32 bytes (16-byte aligned)
+            // Use default threshold values matching BrushSettings defaults
             var pushConstants = GpuUtils.CreatePushConstants()
-                .Add(regionSize)      // u_region_size
-                .AddPadding(12)       // Padding to 16 bytes
+                .Add(regionSize)              // 0: u_region_size
+                .Add(40)                      // 4: overlay_min_visible_blend (default)
+                .Add(215)                     // 8: base_max_visible_blend (default)
+                .Add(128)                     // 12: base_override_threshold (default)
+                .Add(128)                     // 16: overlay_override_threshold (default)
+                .Add(2.0f)                    // 20: blend_reduction_rate (default)
+                .AddPadding(8)                // 24-31: padding to 32 bytes
                 .Build();
+
             op.SetPushConstants(pushConstants);
 
-            // Dispatch dimensions
             uint groupsX = (uint)((regionSize + 7) / 8);
             uint groupsY = (uint)((regionSize + 7) / 8);
 
@@ -413,10 +392,6 @@ namespace Terrain3DTools.Pipeline
             return (commands, tempRids, shaderPaths);
         }
 
-        /// <summary>
-        /// Creates GPU commands to apply instance exclusion edits.
-        /// Combines with existing exclusion map (max operation).
-        /// </summary>
         private (Action<long> commands, List<Rid> tempRids, List<string> shaders) CreateInstanceExclusionCommands(
             Vector2I regionCoords,
             RegionData regionData,
@@ -428,7 +403,6 @@ namespace Terrain3DTools.Pipeline
             var tempRids = new List<Rid>();
             var shaderPaths = new List<string> { SHADER_PATH };
 
-            // Ensure region has an exclusion map
             var exclusionMap = regionData.GetOrCreateExclusionMap(regionSize);
             if (!exclusionMap.IsValid)
             {
@@ -445,18 +419,15 @@ namespace Terrain3DTools.Pipeline
                 return (null, tempRids, new List<string>());
             }
 
-            // Bind resources
-            op.BindStorageImage(0, exclusionMap);                   // In/Out: region exclusion
-            op.BindStorageImage(1, editBuffer.InstanceExclusion);  // In: manual exclusion
+            op.BindStorageImage(0, exclusionMap);
+            op.BindStorageImage(1, editBuffer.InstanceExclusion);
 
-            // Push constants
             var pushConstants = GpuUtils.CreatePushConstants()
-                .Add(regionSize)      // u_region_size
-                .AddPadding(12)       // Padding to 16 bytes
+                .Add(regionSize)
+                .AddPadding(12)
                 .Build();
             op.SetPushConstants(pushConstants);
 
-            // Dispatch dimensions
             uint groupsX = (uint)((regionSize + 7) / 8);
             uint groupsY = (uint)((regionSize + 7) / 8);
 

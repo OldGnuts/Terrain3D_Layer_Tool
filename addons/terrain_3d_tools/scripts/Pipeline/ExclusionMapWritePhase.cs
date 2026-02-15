@@ -1,4 +1,3 @@
-// /Pipeline/ExclusionMapWritePhase.cs
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -38,33 +37,27 @@ namespace Terrain3DTools.Pipeline
                 var tieredLayers = context.RegionDependencyManager.GetTieredLayersForRegion(regionCoords);
                 if (tieredLayers == null) continue;
 
-                // Get non-instancer feature layers that can write exclusion
                 var exclusionWriters = tieredLayers.FeatureLayers
                     .OfType<FeatureLayer>()
                     .Where(f => GodotObject.IsInstanceValid(f) && !f.IsInstancer)
                     .ToList();
 
-                // Check if any instancers will need the exclusion map
                 var hasInstancers = tieredLayers.FeatureLayers
                     .OfType<InstancerLayer>()
                     .Any(l => GodotObject.IsInstanceValid(l));
 
                 if (!hasInstancers)
                 {
-                    // No instancers need the exclusion map - skip
                     continue;
                 }
 
-                // Build dependencies
                 var dependencies = new List<AsyncGpuTask>();
 
-                // Depend on feature application (paths need to be applied first)
                 if (context.RegionFeatureApplicationTasks.TryGetValue(regionCoords, out var featureAppTask))
                 {
                     dependencies.Add(featureAppTask);
                 }
 
-                // Also depend on individual feature mask tasks
                 foreach (var writer in exclusionWriters)
                 {
                     if (context.FeatureLayerMaskTasks.TryGetValue(writer, out var maskTask))
@@ -75,6 +68,20 @@ namespace Terrain3DTools.Pipeline
 
                 var currentRegionCoords = regionCoords;
 
+                // Collect read sources from exclusion writers
+                var readSources = new List<Rid>();
+                foreach (var writer in exclusionWriters)
+                {
+                    foreach (var rid in writer.GetMaskWriteTargets())
+                    {
+                        if (rid.IsValid)
+                            readSources.Add(rid);
+                    }
+                }
+
+                // Ensure exclusion map exists for write target declaration
+                var exclusionMap = regionData.GetOrCreateExclusionMap(context.RegionSize);
+
                 var task = CreateExclusionWriteTask(
                     currentRegionCoords,
                     regionData,
@@ -84,12 +91,17 @@ namespace Terrain3DTools.Pipeline
 
                 if (task != null)
                 {
+                    task.DeclareResources(
+                        writes: new[] { exclusionMap },
+                        reads: readSources
+                    );
+
                     tasks[regionCoords] = task;
                     context.ExclusionWriteTasks[regionCoords] = task;
                     AsyncGpuTaskManager.Instance.AddTask(task);
 
                     DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                        $"Created exclusion write task for region {regionCoords} with {exclusionWriters.Count} writers");
+                        $"Created exclusion write task for region {regionCoords} with {exclusionWriters.Count} writer(s)");
                 }
             }
 
@@ -105,7 +117,6 @@ namespace Terrain3DTools.Pipeline
         {
             int regionSize = context.RegionSize;
 
-            // Capture state for lazy evaluation
             var writerStates = new List<(FeatureLayer layer, Rid maskRid, Vector2 min, Vector2 max)>();
             foreach (var writer in exclusionWriters)
             {
@@ -119,10 +130,8 @@ namespace Terrain3DTools.Pipeline
                 var allTempRids = new List<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // Ensure exclusion map exists
                 var exclusionMap = regionData.GetOrCreateExclusionMap(regionSize);
 
-                // Step 1: Clear exclusion map to 0
                 if (regionData.ExclusionMapNeedsClearing)
                 {
                     var (clearCmd, clearRids, clearShader) = GpuKernels.CreateClearCommands(
@@ -142,7 +151,6 @@ namespace Terrain3DTools.Pipeline
                     regionData.ClearExclusionMapFlag();
                 }
 
-                // Step 2: Each writer adds to exclusion map (MAX blend)
                 var regionMin = TerrainCoordinateHelper.RegionMinWorld(regionCoords, regionSize);
                 var regionSizeWorld = new Vector2(regionSize, regionSize);
 
@@ -192,7 +200,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 null,
                 owners,
-                $"Exclusion write: Region {regionCoords}",
+                $"Exclusion Write: Region {regionCoords}",
                 dependencies);
         }
     }

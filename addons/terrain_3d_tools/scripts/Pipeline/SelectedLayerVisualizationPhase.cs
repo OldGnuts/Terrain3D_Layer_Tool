@@ -11,10 +11,7 @@ namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 11: Updates visualization for the currently selected layer.
-    /// <para>
-    /// Strictly enforces cleanup order. 
-    /// UniformSets (Dependents) are freed before TextureArrays/Buffers (Owners).
-    /// </para>
+    /// Strictly enforces cleanup order for GPU resources.
     /// </summary>
     public class SelectedLayerVisualizationPhase : IProcessingPhase
     {
@@ -30,7 +27,8 @@ namespace Terrain3DTools.Pipeline
             var tasks = new Dictionary<object, AsyncGpuTask>();
             var selectedLayer = context.SelectedLayer;
 
-            if (selectedLayer == null || !GodotObject.IsInstanceValid(selectedLayer)) return tasks;
+            if (selectedLayer == null || !GodotObject.IsInstanceValid(selectedLayer)) 
+                return tasks;
 
             if (selectedLayer.DoesAnyMaskRequireHeightData())
             {
@@ -55,15 +53,40 @@ namespace Terrain3DTools.Pipeline
                 return tasks;
             }
 
+            // Build dependencies - visualization runs after everything else
             var dependencies = new List<AsyncGpuTask>();
+            
             foreach (var coord in overlappingRegions)
             {
                 if (context.RegionHeightCompositeTasks.TryGetValue(coord, out var heightTask))
                     dependencies.Add(heightTask);
-                if (context.RegionFeatureApplicationTasks != null && 
-                    context.RegionFeatureApplicationTasks.TryGetValue(coord, out var featureTask))
+                
+                if (context.RegionTextureCompositeTasks.TryGetValue(coord, out var textureTask))
+                    dependencies.Add(textureTask);
+                
+                if (context.RegionFeatureApplicationTasks.TryGetValue(coord, out var featureTask))
                     dependencies.Add(featureTask);
+
+                if (context.BlendSmoothingTasks.TryGetValue(coord, out var smoothTask))
+                    dependencies.Add(smoothTask);
+
+                if (context.ManualEditApplicationTasks.TryGetValue(coord, out var manualTask))
+                    dependencies.Add(manualTask);
             }
+
+            // Collect read sources (heightmaps from overlapping regions)
+            var readSources = new List<Rid>();
+            foreach (var coord in overlappingRegions)
+            {
+                var regionData = context.RegionMapManager.GetRegionData(coord);
+                if (regionData?.HeightMap.IsValid == true)
+                    readSources.Add(regionData.HeightMap);
+            }
+
+            // Write target is the visualization texture
+            var writeTargets = new List<Rid>();
+            if (selectedLayer.layerHeightVisualizationTextureRID.IsValid)
+                writeTargets.Add(selectedLayer.layerHeightVisualizationTextureRID);
 
             var task = CreateVisualizationTaskLazy(
                 selectedLayer,
@@ -73,6 +96,11 @@ namespace Terrain3DTools.Pipeline
 
             if (task != null)
             {
+                task.DeclareResources(
+                    writes: writeTargets,
+                    reads: readSources
+                );
+
                 tasks[selectedLayer] = task;
                 AsyncGpuTaskManager.Instance.AddTask(task);
             }
@@ -104,16 +132,12 @@ namespace Terrain3DTools.Pipeline
                     $"JIT_Prep_Viz:{layerName}");
 
                 var allCommands = new List<Action<long>>();
-                
-                // 1. Operation RIDs (UniformSets)
                 var operationRids = new HashSet<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // 2. Owner RIDs (Must be freed LAST)
                 Rid heightmapArrayRid = new Rid();
                 Rid metadataBufferRid = new Rid();
 
-                // --- STAGING ---
                 var (stagingTask, stagingResult) = HeightDataStager.StageHeightDataForLayerAsync(
                     layer, regionMapManager, regionSize, null);
 
@@ -129,7 +153,6 @@ namespace Terrain3DTools.Pipeline
                     metadataBufferRid = stagingResult.MetadataBufferRid;
                 }
 
-                // --- CLEAR ---
                 var (clearCmd, clearRids, clearShader) = GpuKernels.CreateClearCommands(
                     layer.layerHeightVisualizationTextureRID,
                     Colors.Black,
@@ -144,7 +167,6 @@ namespace Terrain3DTools.Pipeline
                     allShaderPaths.Add(clearShader);
                 }
 
-                // --- STITCH ---
                 if (heightmapArrayRid.IsValid && metadataBufferRid.IsValid)
                 {
                     var (stitchCmd, stitchRids, stitchShader) = GpuKernels.CreateStitchHeightmapCommands(
@@ -167,20 +189,20 @@ namespace Terrain3DTools.Pipeline
                 DebugManager.Instance?.EndTimer(DEBUG_CLASS_NAME, DebugCategory.GpuResources, 
                     $"JIT_Prep_Viz:{layerName}");
 
+                if (allCommands.Count == 0)
+                    return ((l) => { }, new List<Rid>(), new List<string>());
+
                 Action<long> combined = (computeList) =>
                 {
-                    Gpu.Rd.ComputeListAddBarrier(computeList);
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
-                        Gpu.Rd.ComputeListAddBarrier(computeList);
+                        if (i < allCommands.Count - 1)
+                            Gpu.Rd.ComputeListAddBarrier(computeList);
                     }
                 };
 
-                // Convert Operation RIDs to List FIRST
                 var finalCleanupList = operationRids.ToList();
-
-                // Add Owners LAST
                 if (heightmapArrayRid.IsValid) finalCleanupList.Add(heightmapArrayRid);
                 if (metadataBufferRid.IsValid) finalCleanupList.Add(metadataBufferRid);
 
@@ -199,7 +221,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Visualization: {layerName} (Lazy)",
+                $"Visualization: {layerName}",
                 dependencies);
         }
     }

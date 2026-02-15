@@ -1,20 +1,17 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Utils;
 using Terrain3DTools.Core;
 using Terrain3DTools.Core.Debug;
-using System;
 
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 3: Generates mask textures for all dirty texture layers.
-    /// <para>
-    /// <b>Fix:</b> Strictly enforces cleanup order. 
-    /// UniformSets (Dependents) are freed before TextureArrays/Buffers (Owners).
-    /// </para>
+    /// Enforces cleanup order: UniformSets (dependents) are freed before TextureArrays/Buffers (owners).
     /// </summary>
     public class TextureLayerMaskPhase : IProcessingPhase
     {
@@ -45,12 +42,15 @@ namespace Terrain3DTools.Pipeline
                     .Where(coord => context.CurrentlyActiveRegions.Contains(coord))
                     .ToList();
 
-                // Case 1: No active regions -> Clear
                 if (activeOverlappingRegions.Count == 0)
                 {
                     var clearTask = CreateClearLayerTextureTaskLazy(layer);
                     if (clearTask != null)
                     {
+                        clearTask.DeclareResources(
+                            writes: new[] { layer.layerTextureRID }
+                        );
+
                         context.TextureLayerMaskTasks[layer] = clearTask;
                         tasks[layer] = clearTask;
                         AsyncGpuTaskManager.Instance.AddTask(clearTask);
@@ -58,8 +58,9 @@ namespace Terrain3DTools.Pipeline
                     continue;
                 }
 
-                // Case 2: Process Layer
                 var dependencies = new List<AsyncGpuTask>();
+                var readSources = new List<Rid>();
+
                 if (layer.DoesAnyMaskRequireHeightData())
                 {
                     var compositeDependencies = activeOverlappingRegions
@@ -67,6 +68,15 @@ namespace Terrain3DTools.Pipeline
                         .Select(rc => context.RegionHeightCompositeTasks[rc])
                         .ToList();
                     dependencies.AddRange(compositeDependencies);
+
+                    foreach (var regionCoord in activeOverlappingRegions)
+                    {
+                        var regionData = context.RegionMapManager.GetRegionData(regionCoord);
+                        if (regionData?.HeightMap.IsValid == true)
+                        {
+                            readSources.Add(regionData.HeightMap);
+                        }
+                    }
                 }
 
                 Action onComplete = () => 
@@ -85,6 +95,11 @@ namespace Terrain3DTools.Pipeline
 
                 if (maskTask != null)
                 {
+                    maskTask.DeclareResources(
+                        writes: new[] { layer.layerTextureRID },
+                        reads: readSources
+                    );
+
                     context.TextureLayerMaskTasks[layer] = maskTask;
                     tasks[layer] = maskTask;
                     AsyncGpuTaskManager.Instance.AddTask(maskTask);
@@ -108,21 +123,17 @@ namespace Terrain3DTools.Pipeline
             
             Func<(Action<long>, List<Rid>, List<string>)> generator = () =>
             {
-                if (!GodotObject.IsInstanceValid(layer)) return ((l) => { }, new List<Rid>(), new List<string>());
+                if (!GodotObject.IsInstanceValid(layer)) 
+                    return ((l) => { }, new List<Rid>(), new List<string>());
 
                 var allCommands = new List<Action<long>>();
-                
-                // 1. Operation RIDs (UniformSets, Temp Buffers)
-                // We use a HashSet here to deduplicate shared UniformSets from sub-tasks.
                 var operationRids = new HashSet<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // 2. Owner RIDs (Must be freed LAST)
                 Rid heightmapArrayRid = new Rid();
                 Rid metadataBufferRid = new Rid();
                 int stagedRegionCount = 0;
 
-                // --- STAGING ---
                 if (layer.DoesAnyMaskRequireHeightData())
                 {
                     var (stagingTask, stagingResult) = HeightDataStager.StageHeightDataForLayerAsync(
@@ -132,19 +143,16 @@ namespace Terrain3DTools.Pipeline
                     {
                         allCommands.Add(stagingTask.GpuCommands);
                         
-                        // Extract Staging Internals (UniformSets for Copy commands)
                         var (stagedRids, stagedPaths) = stagingTask.ExtractResourcesForCleanup();
                         foreach (var rid in stagedRids) operationRids.Add(rid);
                         allShaderPaths.AddRange(stagedPaths);
                         
-                        // Capture Owners
                         heightmapArrayRid = stagingResult.HeightmapArrayRid;
                         metadataBufferRid = stagingResult.MetadataBufferRid;
                         stagedRegionCount = stagingResult.ActiveRegionCount;
                     }
                 }
 
-                // --- PIPELINE ---
                 var pipelineTask = LayerMaskPipeline.CreateUpdateLayerTextureTask(
                     layer.layerTextureRID,
                     layer,
@@ -164,28 +172,23 @@ namespace Terrain3DTools.Pipeline
                     {
                         allCommands.Add(pipelineTask.GpuCommands);
                         
-                        // Extract Pipeline Internals (UniformSets for Masks/Stitch/Falloff)
                         var (pipeRids, pipePaths) = pipelineTask.ExtractResourcesForCleanup();
                         foreach (var rid in pipeRids) operationRids.Add(rid);
                         allShaderPaths.AddRange(pipePaths);
                     }
                 }
 
-                // --- ASSEMBLY & ORDERING ---
                 Action<long> combined = (computeList) =>
                 {
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
-                        if (i < allCommands.Count - 1) Gpu.Rd.ComputeListAddBarrier(computeList);
+                        if (i < allCommands.Count - 1) 
+                            Gpu.Rd.ComputeListAddBarrier(computeList);
                     }
                 };
 
-                // CRITICAL FIX: Convert Operation RIDs to List FIRST
                 var finalCleanupList = operationRids.ToList();
-
-                // CRITICAL FIX: Add Owners LAST.
-                // This guarantees [UniformSets] -> [Texture/Buffer] destruction order.
                 if (heightmapArrayRid.IsValid) finalCleanupList.Add(heightmapArrayRid);
                 if (metadataBufferRid.IsValid) finalCleanupList.Add(metadataBufferRid);
 
@@ -197,7 +200,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Texture Mask: {layerName} (Lazy)",
+                $"Texture Mask: {layerName}",
                 dependencies);
         }
 
@@ -227,7 +230,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 new List<object> { layer },
-                $"Clear Texture: {layer.LayerName} (Lazy)",
+                $"Clear Texture: {layer.LayerName}",
                 null);
         }
     }

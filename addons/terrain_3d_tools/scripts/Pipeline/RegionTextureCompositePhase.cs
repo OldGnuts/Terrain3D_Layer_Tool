@@ -1,18 +1,17 @@
-// /Pipeline/RegionTextureCompositePhase.cs
 using Godot;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Terrain3DTools.Layers;
 using Terrain3DTools.Utils;
 using Terrain3DTools.Core;
 using Terrain3DTools.Core.Debug;
-using System;
 
 namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 4: Composites texture layers into region control maps.
-    /// Refactored to use Lazy (JIT) initialization.
+    /// Uses lazy (JIT) initialization.
     /// </summary>
     public class RegionTextureCompositePhase : IProcessingPhase
     {
@@ -62,6 +61,13 @@ namespace Terrain3DTools.Pipeline
 
                 Action onComplete = () => { };
 
+                var regionData = context.RegionMapManager.GetOrCreateRegionData(regionCoords);
+
+                var readSources = allTextureLayers
+                    .Where(l => l.layerTextureRID.IsValid)
+                    .Select(l => l.layerTextureRID)
+                    .ToList();
+
                 var task = CreateRegionControlCompositeTaskLazy(
                     currentRegionCoords,
                     allTextureLayers,
@@ -71,6 +77,11 @@ namespace Terrain3DTools.Pipeline
 
                 if (task != null)
                 {
+                    task.DeclareResources(
+                        writes: new[] { regionData.ControlMap },
+                        reads: readSources
+                    );
+
                     context.RegionTextureCompositeTasks[currentRegionCoords] = task;
                     tasks[currentRegionCoords] = task;
                     AsyncGpuTaskManager.Instance.AddTask(task);
@@ -101,7 +112,6 @@ namespace Terrain3DTools.Pipeline
                 var allTempRids = new List<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // 1. Clear
                 var (clearCmd, clearRids, clearShader) = GpuKernels.CreateClearCommands(
                     regionData.ControlMap,
                     Colors.Black,
@@ -116,7 +126,6 @@ namespace Terrain3DTools.Pipeline
                     allShaderPaths.Add(clearShader);
                 }
 
-                // 2. Apply Layers
                 if (textureLayers.Count > 0)
                 {
                     var regionMin = TerrainCoordinateHelper.RegionMinWorld(regionCoords, regionSize);
@@ -149,7 +158,6 @@ namespace Terrain3DTools.Pipeline
 
                 Action<long> combinedCommands = (computeList) =>
                 {
-                    Gpu.Rd.ComputeListAddBarrier(computeList);
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
@@ -171,7 +179,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Region {regionCoords} texture composite (Lazy)",
+                $"Texture Composite: Region {regionCoords}",
                 dependencies);
         }
     }

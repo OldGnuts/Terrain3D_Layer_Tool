@@ -1,4 +1,3 @@
-// /Pipeline/HeightLayerMaskPhase.cs
 using Godot;
 using System;
 using System.Collections.Generic;
@@ -12,8 +11,8 @@ namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 1: Generates mask textures for all dirty height layers.
-    /// Uses Lazy (JIT) initialization via LayerMaskPipeline.
-    /// Now supports height-requiring masks by staging data from previous cycle.
+    /// Uses lazy (JIT) initialization via LayerMaskPipeline.
+    /// Supports height-requiring masks by staging data from previous cycle.
     /// </summary>
     public class HeightLayerMaskPhase : IProcessingPhase
     {
@@ -37,15 +36,12 @@ namespace Terrain3DTools.Pipeline
 
                 AsyncGpuTask task;
 
-                // Check if any masks require height data
                 if (layer.DoesAnyMaskRequireHeightData())
                 {
-                    // Use the staging pattern like TextureLayerMaskPhase
                     task = CreateHeightMaskTaskWithStaging(layer, context);
                 }
                 else
                 {
-                    // Simple case - no height data needed
                     task = LayerMaskPipeline.CreateUpdateLayerTextureTask(
                         layer.layerTextureRID,
                         layer,
@@ -60,6 +56,10 @@ namespace Terrain3DTools.Pipeline
 
                 if (task != null)
                 {
+                    task.DeclareResources(
+                        writes: new[] { layer.layerTextureRID }
+                    );
+
                     context.HeightLayerMaskTasks[layer] = task;
                     tasks[layer] = task;
                     AsyncGpuTaskManager.Instance.AddTask(task);
@@ -82,7 +82,6 @@ namespace Terrain3DTools.Pipeline
             int height = layer.Size.Y;
             Rid targetTexture = layer.layerTextureRID;
 
-            // Determine overlapping regions (may have data from previous cycle)
             var overlappingRegionCoords = TerrainCoordinateHelper
                 .GetRegionBoundsForLayer(layer, context.RegionSize)
                 .GetRegionCoords()
@@ -92,7 +91,6 @@ namespace Terrain3DTools.Pipeline
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
                 $"Layer '{layerName}' requires height data, overlaps {overlappingRegionCoords.Count} active region(s)");
 
-            // Capture references for the closure
             var regionMapManager = context.RegionMapManager;
             int regionSize = context.RegionSize;
 
@@ -105,12 +103,10 @@ namespace Terrain3DTools.Pipeline
                 var operationRids = new HashSet<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // Owner RIDs (freed last)
                 Rid heightmapArrayRid = new Rid();
                 Rid metadataBufferRid = new Rid();
                 int stagedRegionCount = 0;
 
-                // Stage height data from existing regions (previous cycle's composites)
                 if (layer.DoesAnyMaskRequireHeightData())
                 {
                     var (stagingTask, stagingResult) = HeightDataStager.StageHeightDataForLayerAsync(
@@ -134,11 +130,10 @@ namespace Terrain3DTools.Pipeline
                     else
                     {
                         DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.MaskGeneration,
-                            $"No height data available to stage for '{layerName}' (first cycle or no overlapping regions)");
+                            $"No height data available to stage for '{layerName}'");
                     }
                 }
 
-                // Create the mask pipeline task
                 var pipelineTask = LayerMaskPipeline.CreateUpdateLayerTextureTask(
                     targetTexture,
                     layer,
@@ -163,7 +158,6 @@ namespace Terrain3DTools.Pipeline
                     }
                 }
 
-                // Combine commands
                 Action<long> combined = (computeList) =>
                 {
                     for (int i = 0; i < allCommands.Count; i++)
@@ -174,7 +168,6 @@ namespace Terrain3DTools.Pipeline
                     }
                 };
 
-                // Build cleanup list: operation RIDs first, then owner RIDs
                 var finalCleanupList = operationRids.ToList();
                 if (heightmapArrayRid.IsValid) finalCleanupList.Add(heightmapArrayRid);
                 if (metadataBufferRid.IsValid) finalCleanupList.Add(metadataBufferRid);
@@ -183,12 +176,18 @@ namespace Terrain3DTools.Pipeline
             };
 
             var owners = new List<object> { layer };
-            return new AsyncGpuTask(
+            var task = new AsyncGpuTask(
                 generator,
                 null,
                 owners,
-                $"Height Mask: {layerName} (Lazy+Staging)",
+                $"Height Mask: {layerName}",
                 null);
+
+            task.DeclareResources(
+                writes: new[] { targetTexture }
+            );
+
+            return task;
         }
     }
 }

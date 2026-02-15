@@ -11,7 +11,7 @@ namespace Terrain3DTools.Pipeline
 {
     /// <summary>
     /// Phase 5: Generates mask textures for all dirty feature layers.
-    /// Refactored to use Lazy (JIT) initialization and HeightDataStager.
+    /// Uses lazy (JIT) initialization and HeightDataStager.
     /// </summary>
     public class FeatureLayerMaskPhase : IProcessingPhase
     {
@@ -25,6 +25,7 @@ namespace Terrain3DTools.Pipeline
         public Dictionary<object, AsyncGpuTask> Execute(TerrainProcessingContext context)
         {
             var tasks = new Dictionary<object, AsyncGpuTask>();
+            
             DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
                 $"Processing {context.DirtyFeatureLayers.Count} feature layer(s)");
 
@@ -35,14 +36,14 @@ namespace Terrain3DTools.Pipeline
 
                 featureLayer.SetWorldHeightScale(context.WorldHeightScale);
 
-                // Build Dependencies
                 var dependencies = new List<AsyncGpuTask>();
+                var readSources = new List<Rid>();
+
                 var overlappingRegionCoords = TerrainCoordinateHelper
                     .GetRegionBoundsForLayer(layer, context.RegionSize)
                     .GetRegionCoords()
                     .ToList();
 
-                // Add Height Dependencies if the feature modifies height OR reads height (via masks)
                 if (featureLayer.ModifiesHeight || featureLayer.DoesAnyMaskRequireHeightData())
                 {
                     var heightDependencies = overlappingRegionCoords
@@ -50,6 +51,15 @@ namespace Terrain3DTools.Pipeline
                         .Select(rc => context.RegionHeightCompositeTasks[rc])
                         .ToList();
                     dependencies.AddRange(heightDependencies);
+
+                    foreach (var regionCoord in overlappingRegionCoords)
+                    {
+                        var regionData = context.RegionMapManager.GetRegionData(regionCoord);
+                        if (regionData?.HeightMap.IsValid == true)
+                        {
+                            readSources.Add(regionData.HeightMap);
+                        }
+                    }
                 }
 
                 if (featureLayer.ModifiesTexture)
@@ -61,13 +71,12 @@ namespace Terrain3DTools.Pipeline
                     dependencies.AddRange(textureDependencies);
                 }
 
-                System.Action onComplete = () =>
+                Action onComplete = () =>
                 {
                     if (GodotObject.IsInstanceValid(layer))
                         layer.Visualizer?.Update();
                 };
 
-                // Create the task using the lazy helper
                 var maskTask = CreateFeatureMaskTaskLazy(
                     featureLayer,
                     context.RegionMapManager,
@@ -77,11 +86,19 @@ namespace Terrain3DTools.Pipeline
 
                 if (maskTask != null)
                 {
+                    var writeTargets = layer.GetMaskWriteTargets().ToList();
+                    
+                    maskTask.DeclareResources(
+                        writes: writeTargets,
+                        reads: readSources
+                    );
+
                     context.FeatureLayerMaskTasks[layer] = maskTask;
                     tasks[layer] = maskTask;
                     AsyncGpuTaskManager.Instance.AddTask(maskTask);
+                    
                     DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.PhaseExecution,
-                        $"Feature layer mask task added to AsynceGpuTaskManager on Frame : {Engine.GetProcessFrames()}");
+                        $"Feature mask task added for '{layer.LayerName}' with {writeTargets.Count} write target(s)");
                 }
             }
             return tasks;
@@ -100,20 +117,17 @@ namespace Terrain3DTools.Pipeline
 
             Func<(Action<long>, List<Rid>, List<string>)> generator = () =>
             {
-                if (!GodotObject.IsInstanceValid(layer)) return ((l) => { }, new List<Rid>(), new List<string>());
+                if (!GodotObject.IsInstanceValid(layer)) 
+                    return ((l) => { }, new List<Rid>(), new List<string>());
 
                 var allCommands = new List<Action<long>>();
-                
-                // 1. Operation RIDs (UniformSets, Temp Buffers)
                 var operationRids = new HashSet<Rid>();
                 var allShaderPaths = new List<string>();
 
-                // 2. Owner RIDs (Must be freed LAST)
                 Rid heightmapArrayRid = new Rid();
                 Rid metadataBufferRid = new Rid();
                 int stagedRegionCount = 0;
 
-                // --- STAGING ---
                 if (layer.DoesAnyMaskRequireHeightData())
                 {
                     var (stagingTask, stagingResult) = HeightDataStager.StageHeightDataForLayerAsync(
@@ -133,7 +147,6 @@ namespace Terrain3DTools.Pipeline
                     }
                 }
 
-                // --- PIPELINE ---
                 var pipelineTask = LayerMaskPipeline.CreateUpdateFeatureLayerTextureTask(
                     layer.layerTextureRID,
                     layer,
@@ -159,19 +172,17 @@ namespace Terrain3DTools.Pipeline
                     }
                 }
 
-                // --- ASSEMBLY & ORDERING ---
                 Action<long> combined = (computeList) =>
                 {
                     for (int i = 0; i < allCommands.Count; i++)
                     {
                         allCommands[i]?.Invoke(computeList);
-                        if (i < allCommands.Count - 1) Gpu.Rd.ComputeListAddBarrier(computeList);
+                        if (i < allCommands.Count - 1) 
+                            Gpu.Rd.ComputeListAddBarrier(computeList);
                     }
                 };
 
                 var finalCleanupList = operationRids.ToList();
-
-                // Add Owners LAST to guarantee destruction order
                 if (heightmapArrayRid.IsValid) finalCleanupList.Add(heightmapArrayRid);
                 if (metadataBufferRid.IsValid) finalCleanupList.Add(metadataBufferRid);
 
@@ -183,7 +194,7 @@ namespace Terrain3DTools.Pipeline
                 generator,
                 onComplete,
                 owners,
-                $"Feature Mask: {layerName} (Lazy)",
+                $"Feature Mask: {layerName}",
                 dependencies);
         }
     }
