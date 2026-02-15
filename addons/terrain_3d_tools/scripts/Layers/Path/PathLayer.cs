@@ -740,6 +740,22 @@ namespace Terrain3DTools.Layers
 
             return boundsChanged || sizeChanged;
         }
+
+        /// <summary>
+        /// Returns all RIDs this layer writes to during mask generation.
+        /// Includes SDF and zone data textures in addition to base layer textures.
+        /// </summary>
+        public override IEnumerable<Rid> GetMaskWriteTargets()
+        {
+            foreach (var rid in base.GetMaskWriteTargets())
+                yield return rid;
+
+            if (_sdfTextureRid.IsValid)
+                yield return _sdfTextureRid;
+
+            if (_zoneDataTextureRid.IsValid)
+                yield return _zoneDataTextureRid;
+        }
         #endregion
     }
 }
