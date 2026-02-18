@@ -202,7 +202,8 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
-        /// Pushes height and control images into Terrain3D's non-destructive layer stack.
+        /// Pushes height and control images directly to Terrain3D as persistent overrides.
+        /// Uses the override mechanism to bypass the non-destructive layer stack and commit data to disk.
         /// </summary>
         private void PushImagesToTerrain3DLayers(Vector2I regionCoord, Image heightImage, Image controlImage)
         {
@@ -213,117 +214,24 @@ namespace Terrain3DTools.Core
                 t3DData.AddRegionBlank(regionCoord, false);
             }
 
-            if (heightImage == null && controlImage == null)
-            {
-                ReleaseRegionLayers(regionCoord);
-                return;
-            }
-
-            long heightExternalId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Height);
-            long controlExternalId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Control);
-
-            int writesRemaining = 0;
-            if (heightImage != null)
-                writesRemaining++;
-            if (controlImage != null)
-                writesRemaining++;
-
-            bool wroteAnyLayer = false;
-
-            if (heightImage != null)
-            {
-                bool shouldUpdate = (--writesRemaining == 0);
-                wroteAnyLayer |= TrySetMapLayer(regionCoord,
-                    Terrain3DRegion.MapType.Height,
-                    heightImage,
-                    heightExternalId,
-                    shouldUpdate);
-            }
-            else
-            {
-                bool shouldUpdate = controlImage == null;
-                TryReleaseMapLayer(heightExternalId, true, shouldUpdate);
-            }
-
-            if (controlImage != null)
-            {
-                bool shouldUpdate = (--writesRemaining == 0);
-                wroteAnyLayer |= TrySetMapLayer(regionCoord,
-                    Terrain3DRegion.MapType.Control,
-                    controlImage,
-                    controlExternalId,
-                    shouldUpdate);
-            }
-            else
-            {
-                bool shouldUpdate = heightImage == null;
-                TryReleaseMapLayer(controlExternalId, true, shouldUpdate);
-            }
-
-            if (!wroteAnyLayer)
-                return;
-
-            var t3DRegion = t3DData.GetRegion(regionCoord);
-            if (t3DRegion == null)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to get Terrain3D region {regionCoord}");
-                return;
-            }
-
-            t3DRegion.Edited = true;
-        }
-
-        private bool TrySetMapLayer(
-            Vector2I regionCoord,
-            Terrain3DRegion.MapType mapType,
-            Image image,
-            long externalLayerId,
-            bool shouldUpdate)
-        {
             try
             {
-                if (_terrain3D == null || !GodotObject.IsInstanceValid(_terrain3D))
-                {
-                    DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                        "Terrain3D instance is null or invalid while attempting to set map layer");
-                    return false;
-                }
+                // Use the new override API to commit data directly to disk
+                // Pass null for color map as we don't generate color data
+                t3DData.SetRegionOverride(regionCoord, heightImage, controlImage, null);
 
-                var terrainData = _terrain3D.Data;
-                if (terrainData == null || !GodotObject.IsInstanceValid(terrainData))
-                {
-                    DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                        "Terrain3D data is null or invalid while attempting to set map layer");
-                    return false;
-                }
-
-                var stampLayer = terrainData.SetMapLayer(
-                    regionCoord,
-                    (long)mapType,
-                    image,
-                    externalLayerId,
-                    shouldUpdate);
-
-                if (stampLayer == null)
-                {
-                    DebugManager.Instance?.LogWarning(DEBUG_CLASS_NAME,
-                        $"Terrain3D returned null layer for {mapType} at {regionCoord} (layerId={externalLayerId})");
-                    return false;
-                }
-
-                return true;
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
+                    $"Set region override for {regionCoord} (height={heightImage != null}, control={controlImage != null})");
             }
             catch (Exception ex)
             {
                 DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to set {mapType} layer for {regionCoord}: {ex.Message}");
-                return false;
+                    $"Failed to set region override for {regionCoord}: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Finalizes terrain update by adding/removing regions and updating maps.
+        /// Finalizes terrain update by adding/removing regions and clearing overrides.
         /// </summary>
         private void FinalizeTerrainUpdate(List<Vector2I> allActiveRegions)
         {
@@ -348,27 +256,27 @@ namespace Terrain3DTools.Core
             }
 
             List<Vector2I> regionLocations = GetRegionLocations();
-            int removedLayerCount = 0;
+            int clearedOverrideCount = 0;
             foreach (Vector2I regionLocation in regionLocations)
             {
                 if (!allActiveRegions.Contains(regionLocation))
                 {
-                    removedLayerCount += ReleaseRegionLayers(regionLocation);
+                    // Clear overrides for regions that are no longer active
+                    try
+                    {
+                        t3DData.SetRegionOverride(regionLocation, null, null, null);
+                        clearedOverrideCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                            $"Failed to clear region override for {regionLocation}: {ex.Message}");
+                    }
                 }
             }
 
-            try
-            {
-                t3DData.UpdateMaps((long)Terrain3DRegion.MapType.Max, true);
-
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
-                    $"Finalized: removed {removedLayerCount} plugin layer(s), added {addedCount} region(s), on frame {Engine.GetProcessFrames()}");
-            }
-            catch (System.Exception ex)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to finalize: {ex.Message}");
-            }
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
+                $"Finalized: cleared {clearedOverrideCount} region override(s), added {addedCount} region(s), on frame {Engine.GetProcessFrames()}");
         }
 
         public bool ValidateTerrainSystem()
@@ -559,57 +467,6 @@ namespace Terrain3DTools.Core
             return result;
         }
 
-        private static long GetExternalLayerId(Vector2I regionCoord, Terrain3DRegion.MapType mapType)
-        {
-            string token = $"{nameof(Terrain3DIntegration)}:{mapType}:{regionCoord.X}:{regionCoord.Y}";
-            return unchecked((long)GD.Hash(token));
-        }
-
-        private bool TryReleaseMapLayer(long externalLayerId, bool removeLayer, bool shouldUpdate)
-        {
-            try
-            {
-                if (_terrain3D == null || !GodotObject.IsInstanceValid(_terrain3D))
-                    return false;
-
-                var terrainData = _terrain3D.Data;
-                if (terrainData == null || !GodotObject.IsInstanceValid(terrainData))
-                    return false;
-
-                return terrainData.ReleaseMapLayer(externalLayerId, removeLayer, shouldUpdate);
-            }
-            catch (Exception ex)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to release layer {externalLayerId}: {ex.Message}");
-                return false;
-            }
-        }
-
-        private int ReleaseRegionLayers(Vector2I regionCoord)
-        {
-            int removedLayers = 0;
-
-            var heightId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Height);
-            if (TryReleaseMapLayer(heightId, true, false))
-            {
-                removedLayers++;
-            }
-
-            var controlId = GetExternalLayerId(regionCoord, Terrain3DRegion.MapType.Control);
-            if (TryReleaseMapLayer(controlId, true, false))
-            {
-                removedLayers++;
-            }
-
-            if (removedLayers == 0)
-            {
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
-                    $"No plugin layers to release for region {regionCoord}");
-            }
-
-            return removedLayers;
-        }
         #endregion
     }
 }
