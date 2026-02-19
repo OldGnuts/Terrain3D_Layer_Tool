@@ -146,7 +146,7 @@ namespace Terrain3DTools.Core
                     }
                 }
 
-                PushImagesToTerrain3D(regionCoord, heightImage, controlImage);
+                PushImagesToTerrain3DLayers(regionCoord, heightImage, controlImage);
 
                 DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
                     $"Pushed region {regionCoord}");
@@ -212,9 +212,10 @@ namespace Terrain3DTools.Core
         }
 
         /// <summary>
-        /// Pushes height and control images to Terrain3D region.
+        /// Pushes height and control images directly to Terrain3D as persistent overrides.
+        /// Uses the override mechanism to bypass the non-destructive layer stack and commit data to disk.
         /// </summary>
-        private void PushImagesToTerrain3D(Vector2I regionCoord, Image heightImage, Image controlImage)
+        private void PushImagesToTerrain3DLayers(Vector2I regionCoord, Image heightImage, Image controlImage)
         {
             var t3DData = _terrain3D.Data;
 
@@ -223,25 +224,24 @@ namespace Terrain3DTools.Core
                 t3DData.AddRegionBlank(regionCoord, false);
             }
 
-            var t3DRegion = t3DData.GetRegion(regionCoord);
-            if (t3DRegion == null)
+            try
+            {
+                // Use the new override API to commit data directly to disk
+                // Pass null for color map as we don't generate color data
+                t3DData.SetRegionOverride(regionCoord, heightImage, controlImage, null);
+
+                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainPush,
+                    $"Set region override for {regionCoord} (height={heightImage != null}, control={controlImage != null})");
+            }
+            catch (Exception ex)
             {
                 DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to get Terrain3D region {regionCoord}");
-                return;
+                    $"Failed to set region override for {regionCoord}: {ex.Message}");
             }
-
-            if (heightImage != null)
-                t3DRegion.SetMap(Terrain3DRegion.MapType.Height, heightImage);
-
-            if (controlImage != null)
-                t3DRegion.SetMap(Terrain3DRegion.MapType.Control, controlImage);
-
-            t3DRegion.Edited = true;
         }
 
         /// <summary>
-        /// Finalizes terrain update by adding/removing regions and updating maps.
+        /// Finalizes terrain update by adding/removing regions and clearing overrides.
         /// </summary>
         private void FinalizeTerrainUpdate(List<Vector2I> allActiveRegions)
         {
@@ -266,28 +266,27 @@ namespace Terrain3DTools.Core
             }
 
             List<Vector2I> regionLocations = GetRegionLocations();
-            int removedCount = 0;
+            int clearedOverrideCount = 0;
             foreach (Vector2I regionLocation in regionLocations)
             {
                 if (!allActiveRegions.Contains(regionLocation))
                 {
-                    t3DData.RemoveRegionl(regionLocation, false);
-                    removedCount++;
+                    // Clear overrides for regions that are no longer active
+                    try
+                    {
+                        t3DData.SetRegionOverride(regionLocation, null, null, null);
+                        clearedOverrideCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
+                            $"Failed to clear region override for {regionLocation}: {ex.Message}");
+                    }
                 }
             }
 
-            try
-            {
-                t3DData.UpdateMaps(Terrain3DRegion.MapType.Max, true);
-
-                DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
-                    $"Finalized: removed {removedCount}, added {addedCount}, on frame {Engine.GetProcessFrames()}");
-            }
-            catch (System.Exception ex)
-            {
-                DebugManager.Instance?.LogError(DEBUG_CLASS_NAME,
-                    $"Failed to finalize: {ex.Message}");
-            }
+            DebugManager.Instance?.Log(DEBUG_CLASS_NAME, DebugCategory.TerrainSync,
+                $"Finalized: cleared {clearedOverrideCount} region override(s), added {addedCount} region(s), on frame {Engine.GetProcessFrames()}");
         }
 
         public bool ValidateTerrainSystem()
@@ -683,6 +682,7 @@ namespace Terrain3DTools.Core
 
             return result;
         }
+
         #endregion
     }
 }
